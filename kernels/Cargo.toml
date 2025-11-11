@@ -1,0 +1,11 @@
+[package]
+name = "cuda-static-map-kernels"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cuda_std = { path = "../rust-cuda/crates/cuda_std" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
