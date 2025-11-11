@@ -1,0 +1,3 @@
+[submodule "rust-cuda"]
+	path = rust-cuda
+	url = https://github.com/Snehal-Reddy/rust-cuda.git

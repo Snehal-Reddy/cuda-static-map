@@ -6,8 +6,14 @@
   //   "context": "${localWorkspaceFolder}"
   // },
   "containerEnv": {
-    "NVIDIA_DRIVER_CAPABILITIES": "all"
+    "NVIDIA_DRIVER_CAPABILITIES": "all",
+    "OPTIX_ROOT": "/opt/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64",
+    "OPTIX_ROOT_DIR": "/opt/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64",
+    "CUDNN_INCLUDE_DIR": "/usr/include/x86_64-linux-gnu"
   },
+  "mounts": [
+    "source=/opt/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64,target=/opt/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64,type=bind,consistency=cached"
+  ],
   "runArgs": ["--runtime=nvidia", "--gpus", "all"],
   "customizations": {
     "vscode": {
