@@ -1,0 +1,24 @@
+{
+	"name": "Rust CUDA",
+	"image": "rust-cuda-ubuntu24",
+	"runArgs": [
+		"--runtime=nvidia",
+		"--gpus",
+		"all"
+	],
+	"mounts": [
+		"source=/opt/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64,target=/opt/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64,type=bind,consistency=cached"
+	],
+	"containerEnv": {
+		"OPTIX_ROOT": "/opt/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64",
+		"OPTIX_ROOT_DIR": "/opt/NVIDIA-OptiX-SDK-9.0.0-linux64-x86_64"
+	},
+	"workspaceFolder": "/data/rust-cuda",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/data/rust-cuda,type=bind",
+	"extensions": [
+		"rust-lang.rust-analyzer",
+		"serayuzgur.crates",
+		"tamasfe.even-better-toml",
+		"ms-vscode.cpptools"
+	]
+}
