@@ -3,9 +3,9 @@
 
 static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
-pub mod pair;
 pub mod static_map;
 
 // Re-export main types
-pub use pair::Pair;
+// Pair is defined in cuda-static-map-kernels and works on both CPU and GPU
+pub use cuda_static_map_kernels::Pair;
 pub use static_map::StaticMap;

@@ -60,6 +60,7 @@ name = "cuda-static-map-kernels"
 version = "0.1.0"
 dependencies = [
  "cuda_std",
+ "cust_core",
 ]
 
 [[package]]
@@ -76,6 +77,22 @@ dependencies = [
 
 [[package]]
 name = "cuda_std_macros"
+version = "0.2.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "cust_core"
+version = "0.1.1"
+dependencies = [
+ "cust_derive",
+]
+
+[[package]]
+name = "cust_derive"
 version = "0.2.0"
 dependencies = [
  "proc-macro2",

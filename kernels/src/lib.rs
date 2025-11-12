@@ -1,7 +1,10 @@
-//! GPU-side kernels and device code
-//! This crate is compiled for nvptx64-nvidia-cuda target
+//! Shared kernels and device code
+//! This crate can be compiled for both CPU and GPU targets
+//! - For CPU: used as a regular Rust library dependency
+//! - For GPU: compiled to PTX via cuda_builder with --target=nvptx64-nvidia-cuda
 
-use cuda_std::prelude::*;
+#[cfg(target_arch = "nvptx64")]
+use cuda_std;
 
 pub mod pair;
 pub mod static_map_ref;
