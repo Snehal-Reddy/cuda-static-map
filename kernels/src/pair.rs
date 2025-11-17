@@ -139,6 +139,22 @@ where
     }
 }
 
+/// Equality comparison for pairs.
+///
+/// This allows comparing pairs with potentially different element types,
+/// as long as the elements themselves are comparable.
+impl<T1, T2, U1, U2> core::cmp::PartialEq<Pair<U1, U2>> for Pair<T1, T2>
+where
+    (): AlignedTo<{ alignment::<T1, T2>() }>,
+    (): AlignedTo<{ alignment::<U1, U2>() }>,
+    T1: core::cmp::PartialEq<U1>,
+    T2: core::cmp::PartialEq<U2>,
+{
+    fn eq(&self, other: &Pair<U1, U2>) -> bool {
+        self.first == other.first && self.second == other.second
+    }
+}
+
 /// Type detection trait for tuple-like types.
 pub trait IsTupleLike {}
 
