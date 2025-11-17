@@ -3,12 +3,16 @@
 //! This manages device memory and launches GPU kernels for map operations.
 
 use std::marker::PhantomData;
+use cuda_static_map_kernels::pair::{alignment, AlignedTo};
 
 /// A GPU-accelerated, unordered, associative container of key-value pairs with unique keys.
 /// 
 /// This is the host-side struct that manages the device memory and provides
 /// the API for bulk operations like insert, find, contains, etc.
-pub struct StaticMap<Key, Value> {
+pub struct StaticMap<Key, Value>
+where
+    (): AlignedTo<{ alignment::<Key, Value>() }>,
+{
     // TODO: Add fields for:
     // - Device buffer for storage (DeviceBuffer<cuco::pair<Key, Value>>)
     // - Capacity
@@ -22,7 +26,10 @@ pub struct StaticMap<Key, Value> {
     _value: PhantomData<Value>,
 }
 
-impl<Key, Value> StaticMap<Key, Value> {
+impl<Key, Value> StaticMap<Key, Value>
+where
+    (): AlignedTo<{ alignment::<Key, Value>() }>,
+{
     /// Constructs a statically-sized map with the specified initial capacity
     /// 
     /// TODO: Implement constructor

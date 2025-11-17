@@ -73,6 +73,81 @@ where
     }
 }
 
+/// Trait for types that can be treated as pairs.
+///
+/// This trait enables generic code to work with different pair-like types.
+pub trait PairLike {
+    /// Type of the first element
+    type First;
+    /// Type of the second element
+    type Second;
+
+    /// Get a reference to the first element
+    fn first(&self) -> &Self::First;
+    /// Get a reference to the second element
+    fn second(&self) -> &Self::Second;
+
+    /// Convert to owned values (requires Clone)
+    fn into_pair(self) -> (Self::First, Self::Second)
+    where
+        Self: Sized,
+        Self::First: Clone,
+        Self::Second: Clone,
+    {
+        (self.first().clone(), self.second().clone())
+    }
+}
+
+// Implement PairLike for standard Rust tuples (A, B)
+impl<T1, T2> PairLike for (T1, T2) {
+    type First = T1;
+    type Second = T2;
+
+    fn first(&self) -> &Self::First {
+        &self.0
+    }
+
+    fn second(&self) -> &Self::Second {
+        &self.1
+    }
+}
+
+// Implement PairLike for our custom Pair type
+impl<First, Second> PairLike for Pair<First, Second>
+where
+    (): AlignedTo<{ alignment::<First, Second>() }>,
+{
+    type First = First;
+    type Second = Second;
+
+    fn first(&self) -> &Self::First {
+        &self.first
+    }
+
+    fn second(&self) -> &Self::Second {
+        &self.second
+    }
+}
+
+// Enable conversion from tuples using From trait
+impl<First, Second> From<(First, Second)> for Pair<First, Second>
+where
+    (): AlignedTo<{ alignment::<First, Second>() }>,
+{
+    fn from((first, second): (First, Second)) -> Self {
+        Self::new(first, second)
+    }
+}
+
+/// Type detection trait for tuple-like types.
+pub trait IsTupleLike {}
+
+impl<T1, T2> IsTupleLike for (T1, T2) {}
+impl<First, Second> IsTupleLike for Pair<First, Second>
+where
+    (): AlignedTo<{ alignment::<First, Second>() }>,
+{}
+
 // GPU-specific implementations (only compiled when targeting nvptx64)
 #[cfg(target_arch = "nvptx64")]
 impl<First, Second> Pair<First, Second>

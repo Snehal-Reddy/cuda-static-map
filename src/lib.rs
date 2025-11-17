@@ -1,5 +1,7 @@
 //! CUDA Static Map - A GPU-accelerated hash map implementation
 
+#![feature(generic_const_exprs)]
+#![allow(incomplete_features)]
 
 static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
