@@ -10,8 +10,10 @@
 use cuda_std;
 
 pub mod pair;
+pub mod static_map;
 pub mod static_map_ref;
 
 pub use pair::{IsTupleLike, Pair, PairLike};
+pub use static_map::StaticMap;
 pub use static_map_ref::StaticMapRef;
 

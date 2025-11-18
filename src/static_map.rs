@@ -1,89 +1,20 @@
-//! Host-side StaticMap implementation
+//! Host-side StaticMap wrapper
 //! 
-//! This manages device memory and launches GPU kernels for map operations.
+//! This is a thin wrapper around the shared StaticMap implementation
+//! that adds host-specific functionality like kernel launching and
+//! device memory management.
+//!
+//! The core StaticMap type is defined in the kernels crate and is
+//! shared between host and device code.
 
-use std::marker::PhantomData;
-use cuda_static_map_kernels::pair::{alignment, AlignedTo};
+// Re-export the shared StaticMap type from kernels
+pub use cuda_static_map_kernels::StaticMap;
 
-/// A GPU-accelerated, unordered, associative container of key-value pairs with unique keys.
-/// 
-/// This is the host-side struct that manages the device memory and provides
-/// the API for bulk operations like insert, find, contains, etc.
-pub struct StaticMap<Key, Value>
-where
-    (): AlignedTo<{ alignment::<Key, Value>() }>,
-{
-    // TODO: Add fields for:
-    // - Device buffer for storage (DeviceBuffer<cuco::pair<Key, Value>>)
-    // - Capacity
-    // - Sentinel values
-    // - Key equality comparator
-    // - Hash function
-    // - CUDA module (for launching kernels)
-    
-    // PhantomData to use for scaffolding
-    _key: PhantomData<Key>,
-    _value: PhantomData<Value>,
-}
+// The StaticMap implementation in kernels/src/static_map.rs already has
+// host-specific methods (marked with #[cfg(not(target_arch = "nvptx64"))]),
+// so this module can add additional host-only functionality if needed.
 
-impl<Key, Value> StaticMap<Key, Value>
-where
-    (): AlignedTo<{ alignment::<Key, Value>() }>,
-{
-    /// Constructs a statically-sized map with the specified initial capacity
-    /// 
-    /// TODO: Implement constructor
-    pub fn new(_capacity: usize) -> Result<Self, Box<dyn std::error::Error>> {
-        // TODO: Load PTX module
-        // TODO: Allocate device buffer
-        // TODO: Initialize sentinel values
-        todo!("Implement StaticMap::new")
-    }
-
-    /// Inserts all key-value pairs in the range
-    /// 
-    /// TODO: Implement bulk insert
-    pub fn insert(
-        &mut self,
-        _pairs: &[crate::Pair<Key, Value>],
-    ) -> Result<usize, Box<dyn std::error::Error>> {
-        todo!("Implement StaticMap::insert")
-    }
-
-    /// Finds values for all keys in the range
-    /// 
-    /// TODO: Implement bulk find
-    pub fn find(
-        &self,
-        _keys: &[Key],
-        _output: &mut [Value],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        todo!("Implement StaticMap::find")
-    }
-
-    /// Checks if keys are contained in the map
-    /// 
-    /// TODO: Implement bulk contains
-    pub fn contains(
-        &self,
-        _keys: &[Key],
-        _output: &mut [bool],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        todo!("Implement StaticMap::contains")
-    }
-
-    /// Gets the capacity of the map
-    /// 
-    /// TODO: Implement
-    pub fn capacity(&self) -> usize {
-        todo!("Implement StaticMap::capacity")
-    }
-
-    /// Gets the number of elements in the map
-    /// 
-    /// TODO: Implement
-    pub fn size(&self) -> usize {
-        todo!("Implement StaticMap::size")
-    }
-}
-
+// For now, we just re-export everything. In the future, we might add:
+// - Additional host-side convenience methods
+// - Integration with cust/cuda_std for kernel launching
+// - Device memory management helpers
