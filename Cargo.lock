@@ -161,6 +161,7 @@ name = "cuda-static-map-kernels"
 version = "0.1.0"
 dependencies = [
  "cuda_std",
+ "cust",
  "cust_core",
 ]
 
