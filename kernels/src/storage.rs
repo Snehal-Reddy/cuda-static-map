@@ -9,10 +9,13 @@
 
 use crate::pair::Pair;
 use cust::error::CudaResult;
+use cust::launch;
 use cust::memory::{
     AsyncCopyDestination, CopyDestination, DeviceBuffer, DeviceCopy, DevicePointer,
 };
+use cust::module::Module;
 use cust::stream::Stream;
+use std::mem::size_of;
 
 /// Storage abstraction for managing device memory buffer of key-value pairs.
 /// # Type Parameters
@@ -20,16 +23,37 @@ use cust::stream::Stream;
 /// - `Value`: The value type (must be ≤ 8 bytes, bitwise comparable)
 ///
 /// # Example
-/// ```
+/// ```no_run
 /// use cuda_static_map_kernels::storage::Storage;
 /// use cuda_static_map_kernels::pair::Pair;
+/// use cust::module::Module;
+/// use cust::stream::Stream;
+/// use cust::stream::StreamFlags;
+///
+/// // Initialize CUDA context (required for all CUDA operations)
+/// let _ctx = cust::quick_init()?;
 ///
 /// // Create storage with capacity 1000
-/// let storage = Storage::<u32, u32>::new(1000)?;
+/// let mut storage = Storage::<u32, u32>::new(1000)?;
 ///
 /// // Initialize all slots with sentinel pair
 /// let sentinel = Pair::new(0xFFFFFFFF, 0xFFFFFFFF);
-/// storage.initialize(sentinel)?;
+///
+/// // Option 1: Use host-to-device copy (simpler, works without module)
+/// storage.initialize(sentinel, None)?;
+///
+/// // Option 2: Use kernel-based initialization (faster for large capacities)
+/// // Load the PTX module compiled by build.rs
+/// static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+/// let module = Module::from_ptx(PTX, &[])?;
+/// storage.initialize(sentinel, Some(&module))?;
+///
+/// // For asynchronous initialization:
+/// let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+/// unsafe {
+///     storage.initialize_async(sentinel, &stream, Some(&module))?;
+///     stream.synchronize()?;
+/// }
 /// ```
 #[cfg(not(target_arch = "nvptx64"))]
 pub struct Storage<Key, Value>
@@ -130,22 +154,36 @@ where
     ///
     /// # Arguments
     /// * `sentinel` - The pair value to initialize all slots with
+    /// * `module` - Optional CUDA module containing the initialization kernel.
+    ///              If `None`, falls back to host-to-device copy.
     ///
     /// # Errors
     /// Returns `CudaResult` if the initialization fails.
     ///
     /// # Note
-    /// Data is copied from host to device. For large capacities,
-    /// `initialize_async()` may provide better performance.
-    pub fn initialize(&mut self, sentinel: Pair<Key, Value>) -> CudaResult<()> {
+    /// If a module is provided, uses a GPU kernel for parallel initialization.
+    /// Otherwise, data is copied from host to device.
+    pub fn initialize(
+        &mut self,
+        sentinel: Pair<Key, Value>,
+        module: Option<&Module>,
+    ) -> CudaResult<()> {
         if self.capacity == 0 {
             return Ok(());
         }
 
-        // Create a host vector filled with the sentinel value
+        // Try kernel-based initialization if module is available
+        if let Some(module) = module {
+            let stream = Stream::new(cust::stream::StreamFlags::NON_BLOCKING, None)?;
+            unsafe {
+                Self::initialize_async_kernel(self, sentinel, &stream, module)?;
+            }
+            stream.synchronize()?;
+            return Ok(());
+        }
+
+        // Fallback to host-to-device copy
         let host_data: Vec<Pair<Key, Value>> = vec![sentinel; self.capacity];
-        
-        // Copy from host to device (synchronous)
         self.buffer.copy_from(&host_data)?;
         
         Ok(())
@@ -159,6 +197,8 @@ where
     /// # Arguments
     /// * `sentinel` - The pair value to initialize all slots with
     /// * `stream` - CUDA stream for asynchronous initialization
+    /// * `module` - Optional CUDA module containing the initialization kernel.
+    ///              If `None`, falls back to host-to-device copy.
     ///
     /// # Errors
     /// Returns `CudaResult` if the initialization fails.
@@ -166,26 +206,63 @@ where
     /// # Safety
     /// The storage cannot be used until the stream operation completes.
     /// The caller must synchronize the stream before using the storage.
-    /// The host data must remain valid until the copy completes.
     pub unsafe fn initialize_async(
         &mut self,
         sentinel: Pair<Key, Value>,
         stream: &Stream,
+        module: Option<&Module>,
     ) -> CudaResult<()> {
         if self.capacity == 0 {
             return Ok(());
         }
 
-        // Create a host vector filled with the sentinel value
+        // Try to use kernel-based initialization if module is available
+        if let Some(module) = module {
+            // Safety: initialize_async_kernel is unsafe but we're in an unsafe function
+            return unsafe { Self::initialize_async_kernel(self, sentinel, stream, module) };
+        }
+
+        // Fallback to host-to-device copy
         let host_data: Vec<Pair<Key, Value>> = vec![sentinel; self.capacity];
-        
-        // Copy from host to device (asynchronous)
-        // Safety: The host_data is valid for the duration of the copy, and the stream
-        // must be synchronized before using the storage.
         unsafe {
             self.buffer.async_copy_from(&host_data, stream)?;
         }
         
+        Ok(())
+    }
+
+    /// Kernel-based initialization using the compiled PTX module.
+    unsafe fn initialize_async_kernel(
+        &mut self,
+        sentinel: Pair<Key, Value>,
+        stream: &Stream,
+        module: &Module,
+    ) -> CudaResult<()> {
+        // Allocate device memory for sentinel value
+        let sentinel_device = DeviceBuffer::from_slice(&[sentinel])?;
+        let sentinel_ptr = sentinel_device.as_device_ptr();
+
+        // Calculate launch configuration
+        // For just initializing the storage, a block size of 128 is sufficient.
+        // TODO: Tune this later if needed.
+        const BLOCK_SIZE: u32 = 128;
+        let grid_size = ((self.capacity as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE).max(1);
+
+        // Get the kernel function
+        let init_kernel = module.get_function("initialize_storage_slots")?;
+
+        // Launch the kernel
+        // Parameters: slots, sentinel_bytes, slot_size, capacity
+        // Safety: Parameters are valid.
+        unsafe {
+            launch!(init_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+                self.buffer.as_device_ptr().as_raw() as *mut u8,
+                sentinel_ptr.as_raw() as *const u8,
+                size_of::<Pair<Key, Value>>(),
+                self.capacity
+            ))?;
+        }
+
         Ok(())
     }
 
@@ -197,6 +274,39 @@ where
     /// Reference to the device buffer
     pub fn as_buffer(&self) -> &DeviceBuffer<Pair<Key, Value>> {
         &self.buffer
+    }
+}
+
+// Device-side kernel for initializing storage
+// This kernel is compiled to PTX and loaded as a module.
+#[cfg(target_arch = "nvptx64")]
+mod device_kernel {
+    use cuda_std::prelude::*;
+
+    /// Device kernel to initialize storage slots by copying sentinel bytes.
+    /// This works for any type by copying the raw bytes of the sentinel value.
+    /// The sentinel is passed as a byte array and copied to each slot.
+    ///
+    /// # Safety
+    /// - `slots` must point to valid device memory of at least `capacity * slot_size` bytes
+    /// - `sentinel_bytes` must point to valid device memory of at least `slot_size` bytes
+    /// - `capacity` must be the actual capacity of the buffer
+    /// - `slot_size` must be the size in bytes of one slot (sizeof(Pair<Key, Value>))
+    #[kernel]
+    #[allow(improper_ctypes_definitions, clippy::missing_safety_doc)]
+    pub unsafe fn initialize_storage_slots(
+        slots: *mut u8,
+        sentinel_bytes: *const u8,
+        slot_size: usize,
+        capacity: usize,
+    ) {
+        let idx = thread::index_1d() as usize;
+        if idx < capacity {
+            let dest = unsafe { slots.add(idx * slot_size) };
+            unsafe {
+                core::ptr::copy_nonoverlapping(sentinel_bytes, dest, slot_size);
+            }
+        }
     }
 }
 
