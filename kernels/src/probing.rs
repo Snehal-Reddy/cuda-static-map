@@ -65,7 +65,7 @@ pub trait ProbingScheme<Key>: Copy + DeviceCopy {
     /// Type of the hash function(s) used by this probing scheme.
     /// For linear probing, this is a single hash function.
     /// For double hashing, this could be a tuple of two hash functions.
-    type Hash: Hash<Key>;
+    type Hasher: Hash<Key>;
 
     /// Create a probing iterator for the given key.
     /// 
@@ -79,7 +79,7 @@ pub trait ProbingScheme<Key>: Copy + DeviceCopy {
     fn make_iterator(&self, key: &Key, bucket_size: usize, capacity: usize) -> ProbingIterator;
 
     /// Get the hash function(s) used by this probing scheme.
-    fn hash_function(&self) -> Self::Hash;
+    fn hash_function(&self) -> Self::Hasher;
 
     /// Get the cooperative group size used by this probing scheme.
     /// 
@@ -95,37 +95,37 @@ pub trait ProbingScheme<Key>: Copy + DeviceCopy {
 /// 
 /// # Type Parameters
 /// * `Key` - The key type that this probing scheme operates on
-/// * `H` - Hash function type that implements `Hash<Key>`
+/// * `Hasher` - Hash function type that implements `Hash<Key>`
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct LinearProbing<Key, H> {
-    hash: H,
+pub struct LinearProbing<Key, Hasher> {
+    hasher: Hasher,
     _phantom: PhantomData<Key>,
 }
 
-impl<Key, H> LinearProbing<Key, H>
+impl<Key, Hasher> LinearProbing<Key, Hasher>
 where
-    H: Hash<Key> + Copy + DeviceCopy,
+    Hasher: Hash<Key> + Copy + DeviceCopy,
 {
     /// Create a new linear probing scheme with the given hash function.
-    pub const fn new(hash: H) -> Self {
+    pub const fn new(hasher: Hasher) -> Self {
         Self {
-            hash,
+            hasher,
             _phantom: PhantomData,
         }
     }
 }
 
-impl<Key, H> ProbingScheme<Key> for LinearProbing<Key, H>
+impl<Key, Hasher> ProbingScheme<Key> for LinearProbing<Key, Hasher>
 where
-    H: Hash<Key> + Copy + DeviceCopy,
+    Hasher: Hash<Key> + Copy + DeviceCopy,
 {
-    type Hash = H;
+    type Hasher = Hasher;
 
     fn make_iterator(&self, key: &Key, bucket_size: usize, capacity: usize) -> ProbingIterator {
         // Compute initial position: hash(key) % (capacity / bucket_size) * bucket_size
         // This aligns the start position to bucket boundaries
-        let hash_value = self.hash.hash(key);
+        let hash_value = self.hasher.hash(key);
         let num_buckets = capacity / bucket_size;
         let init = ((hash_value as usize) % num_buckets) * bucket_size;
         
@@ -133,8 +133,8 @@ where
         ProbingIterator::new(init, bucket_size, capacity)
     }
 
-    fn hash_function(&self) -> Self::Hash {
-        self.hash
+    fn hash_function(&self) -> Self::Hasher {
+        self.hasher
     }
 
     fn cg_size(&self) -> usize {
@@ -142,9 +142,9 @@ where
     }
 }
 
-unsafe impl<Key, H> DeviceCopy for LinearProbing<Key, H>
+unsafe impl<Key, Hasher> DeviceCopy for LinearProbing<Key, Hasher>
 where
-    H: Hash<Key> + Copy + DeviceCopy,
+    Hasher: Hash<Key> + Copy + DeviceCopy,
 {
 }
 
