@@ -8,13 +8,20 @@
 //! if needed.
 
 use crate::pair::Pair;
+
+#[cfg(not(target_arch = "nvptx64"))]
 use cust::error::CudaResult;
+#[cfg(not(target_arch = "nvptx64"))]
 use cust::launch;
+#[cfg(not(target_arch = "nvptx64"))]
 use cust::memory::{
     AsyncCopyDestination, CopyDestination, DeviceBuffer, DeviceCopy, DevicePointer,
 };
+#[cfg(not(target_arch = "nvptx64"))]
 use cust::module::Module;
+#[cfg(not(target_arch = "nvptx64"))]
 use cust::stream::Stream;
+#[cfg(not(target_arch = "nvptx64"))]
 use std::mem::size_of;
 
 /// Storage abstraction for managing device memory buffer of key-value pairs.

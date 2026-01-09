@@ -15,8 +15,14 @@ To run the Docker container with GPU support, ensure you have the following inst
 *   **NVIDIA GPU Drivers**: Your system must have compatible NVIDIA drivers installed. Verify with `nvidia-smi`.
 *   **NVIDIA Container Toolkit**: This is required for Docker to interact with your NVIDIA GPU.
 
+## Building
+
+This project uses `xtask` for unified build management:
+
+*   **Build Host Code**: `cargo xtask build` (or simply `cargo build`)
+*   **Build PTX (Device Code)**: `cargo xtask build-ptx`
+*   **Build Everything**: `cargo xtask build-all`
 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-

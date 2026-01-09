@@ -1,0 +1,4 @@
+[alias]
+xtask = "run -p xtask --bin xtask --"
+build-ptx = "xtask build-ptx"
+

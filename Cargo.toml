@@ -3,6 +3,13 @@ name = "cuda-static-map"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [
+    ".",
+    "kernels",
+    "xtask",
+]
+
 [dependencies]
 cuda_std = { path = "rust-cuda/crates/cuda_std" }
 cust = { path = "rust-cuda/crates/cust" }
