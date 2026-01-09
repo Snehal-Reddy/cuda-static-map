@@ -10,6 +10,7 @@
 use cuda_std;
 
 pub mod pair;
+pub mod probing;
 pub mod storage;
 pub mod static_map;
 pub mod static_map_ref;
