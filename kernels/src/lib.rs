@@ -9,12 +9,14 @@
 #[cfg(target_arch = "nvptx64")]
 use cuda_std;
 
+pub mod hash;
 pub mod pair;
 pub mod probing;
 pub mod storage;
 pub mod static_map;
 pub mod static_map_ref;
 
+pub use hash::{Hash, IdentityHash};
 pub use pair::{IsTupleLike, Pair, PairLike};
 #[cfg(not(target_arch = "nvptx64"))]
 pub use storage::Storage;

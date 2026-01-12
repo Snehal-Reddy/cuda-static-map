@@ -1,15 +1,7 @@
 use core::marker::PhantomData;
 use cust_core::DeviceCopy;
 
-/// Trait for hash functions that can hash keys on both host and device.
-/// 
-/// Hash functions must be `Copy` and device-compatible to work in CUDA kernels.
-pub trait Hash<Key>: Copy + DeviceCopy {
-    /// Hash a key to a `u64` value.
-    /// 
-    /// This method must be callable from both host and device code.
-    fn hash(&self, key: &Key) -> u64;
-}
+use crate::hash::{Hash, HashOutput};
 
 /// Probing iterator that generates slot indices in a probe sequence.
 /// 
@@ -191,7 +183,7 @@ where
         // * stride aligns it to a group boundary
         let hash_value = self.hasher.hash(key);
         let num_groups = capacity / stride;
-        let init_base = ((hash_value as usize) % num_groups) * stride;
+        let init_base = ((hash_value.to_usize()) % num_groups) * stride;
         
         // Add thread-specific offset within the group
         // Each thread gets its own bucket within the aligned chunk
@@ -302,7 +294,7 @@ where
         // Compute initial position using first hash function
         let hash1_value = self.hasher1.hash(key);
         let num_groups = capacity / stride;
-        let init_base = ((hash1_value as usize) % num_groups) * stride;
+        let init_base = ((hash1_value.to_usize()) % num_groups) * stride;
         let init = init_base + thread_rank * bucket_size;
         
         // Compute step size using second hash function
@@ -310,7 +302,7 @@ where
         // For num_groups == 1, we use step_size = stride to avoid division by zero
         let hash2_value = self.hasher2.hash(key);
         let step_base = if num_groups > 1 {
-            ((hash2_value as usize) % (num_groups - 1)) + 1
+            ((hash2_value.to_usize()) % (num_groups - 1)) + 1
         } else {
             1
         };
