@@ -86,5 +86,5 @@ impl_identity_hash_large!(usize, isize);
 #[cfg(target_pointer_width = "32")]
 impl_identity_hash_small!(usize, isize);
 
-// Ensure IdentityHash is device-compatible
+// Safety: This is a zero-sized type containing only PhantomData<Key>.
 unsafe impl<Key> DeviceCopy for IdentityHash<Key> {}

@@ -16,7 +16,7 @@ pub mod storage;
 pub mod static_map;
 pub mod static_map_ref;
 
-pub use hash::{Hash, IdentityHash};
+pub use hash::{Hash, IdentityHash, XXHash32, XXHash64};
 pub use pair::{IsTupleLike, Pair, PairLike};
 #[cfg(not(target_arch = "nvptx64"))]
 pub use storage::Storage;

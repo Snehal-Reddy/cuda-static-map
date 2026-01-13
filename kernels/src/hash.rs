@@ -36,6 +36,8 @@ pub trait Hash<Key>: Copy + DeviceCopy {
 
 // Submodules for hash function implementations
 pub mod identity;
+pub mod xxhash;
 
 // Re-export hash functions
 pub use identity::IdentityHash;
+pub use xxhash::{XXHash32, XXHash64};
