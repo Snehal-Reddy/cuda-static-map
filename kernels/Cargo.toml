@@ -3,6 +3,9 @@ name = "cuda-static-map-kernels"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+primal = "0.3"
+
 [dependencies]
 cuda_std = { path = "../rust-cuda/crates/cuda_std" }
 cust_core = { path = "../rust-cuda/crates/cust_core" }

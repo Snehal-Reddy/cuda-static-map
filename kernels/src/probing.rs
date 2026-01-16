@@ -107,6 +107,12 @@ pub trait ProbingScheme<Key>: Copy + DeviceCopy {
     /// For MVP, this is typically 1 (scalar operations).
     /// TODO: Support larger CG sizes for vectorized operations.
     fn cg_size(&self) -> usize;
+    
+    /// Returns whether this probing scheme uses double hashing.
+    /// 
+    /// This is used to determine if prime number lookup is needed for capacity calculation.
+    /// Double hashing requires prime table sizes to ensure step sizes are coprime.
+    fn is_double_hashing(&self) -> bool;
 }
 
 /// Linear probing scheme.
@@ -200,6 +206,10 @@ where
 
     fn cg_size(&self) -> usize {
         1 // Scalar operations for MVP
+    }
+    
+    fn is_double_hashing(&self) -> bool {
+        false
     }
 }
 
@@ -317,6 +327,10 @@ where
 
     fn cg_size(&self) -> usize {
         1 // Scalar operations for MVP
+    }
+    
+    fn is_double_hashing(&self) -> bool {
+        true
     }
 }
 
