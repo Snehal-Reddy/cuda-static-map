@@ -35,6 +35,9 @@ macro_rules! aligned_to {
                     type Aligned = Aligned;
                 }
                 
+                // Safety: `Aligned` is a zero-sized type (ZST) with no fields. ZSTs are trivially
+                // copyable and contain no references or pointers, making them safe to copy
+                // to/from CUDA device memory.
                 unsafe impl cust_core::DeviceCopy for Aligned {}
             };
         )*
@@ -66,6 +69,9 @@ where
     /// This method works on both CPU and GPU.
     pub fn new(first: First, second: Second) -> Self {
         Self {
+            // Safety: `Aligned` is a zero-sized type (ZST), so `zeroed()` produces a valid
+            // zero-initialized value. ZSTs have no actual memory representation, so zeroing
+            // is always safe and produces a valid instance.
             _marker: unsafe { zeroed::<Aligned<{ alignment::<First, Second>() }>>() },
             first,
             second,

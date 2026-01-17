@@ -62,6 +62,9 @@ impl Extent {
     }
 }
 
+// Safety: Extent is a simple wrapper around usize, which is a primitive type that is
+// trivially copyable and contains no references or pointers. It is safe to copy
+// to/from CUDA device memory.
 unsafe impl DeviceCopy for Extent {}
 
 /// Finds the smallest prime >= `n` using binary search on the precomputed primes array.
@@ -192,6 +195,13 @@ pub struct BucketStorageRef<T, const BUCKET_SIZE: usize> {
     _phantom: PhantomData<T>,
 }
 
+// Safety: BucketStorageRef contains:
+// - `extent: Extent` which implements DeviceCopy
+// - `slots: *const T` which is a raw pointer (raw pointers are Copy and safe to transfer)
+// - `_phantom: PhantomData<T>` which is a zero-sized type
+// All fields are trivially copyable and contain no references to CPU memory.
+// The pointer itself is just a value that can be safely copied; the caller is responsible
+// for ensuring the pointed-to memory is valid device memory.
 unsafe impl<T: Copy, const BUCKET_SIZE: usize> DeviceCopy for BucketStorageRef<T, BUCKET_SIZE> {}
 
 /// Type alias for bucket type (array of slots).
@@ -228,6 +238,9 @@ impl<T, const BUCKET_SIZE: usize> BucketStorageRef<T, BUCKET_SIZE> {
     /// Pointer to the first slot of the bucket
     #[cfg(target_arch = "nvptx64")]
     pub fn get_bucket(&self, bucket_idx: usize) -> *const T {
+        // Safety: `self.slots` is a valid pointer to device memory (guaranteed by BucketStorageRef::new).
+        // The calculation `bucket_idx * BUCKET_SIZE` is bounded by `num_buckets()` which ensures
+        // the resulting pointer is within the allocated memory region.
         unsafe { self.slots.add(bucket_idx * BUCKET_SIZE) }
     }
 
@@ -240,6 +253,9 @@ impl<T, const BUCKET_SIZE: usize> BucketStorageRef<T, BUCKET_SIZE> {
     /// Pointer to the first slot of the bucket
     #[cfg(not(target_arch = "nvptx64"))]
     pub fn get_bucket(&self, bucket_idx: usize) -> *const T {
+        // Safety: `self.slots` is a valid pointer to device memory (guaranteed by BucketStorageRef::new).
+        // The calculation `bucket_idx * BUCKET_SIZE` is bounded by `num_buckets()` which ensures
+        // the resulting pointer is within the allocated memory region.
         unsafe { self.slots.add(bucket_idx * BUCKET_SIZE) }
     }
 
@@ -344,6 +360,10 @@ where
     /// Returns `CudaResult` if device memory allocation fails.
     pub fn new(extent: Extent, stream: &Stream) -> CudaResult<Self> {
         let capacity = extent.value();
+        // Safety: The buffer is only used after `initialize()` or `initialize_async()` fills all slots,
+        // ensuring memory is initialized before reads. Stream ordering is maintained: `initialize()`
+        // synchronizes, and callers must synchronize after `initialize_async()` before use.
+        // `capacity` is a valid usize, so overflow is handled by the allocation function.
         let buffer = unsafe { DeviceBuffer::uninitialized_async(capacity, stream)? };
         Ok(Self { extent, buffer })
     }
@@ -361,6 +381,11 @@ where
     /// # Returns
     /// A `BucketStorageRef` that can be passed to CUDA kernels
     pub fn storage_ref(&self) -> BucketStorageRef<T, BUCKET_SIZE> {
+        // Safety: `self.data()` returns a DevicePointer<T> from `DeviceBuffer`, which points to
+        // valid device memory allocated by CUDA (valid for the lifetime of `self`). CUDA's
+        // `cudaMalloc` returns memory aligned to at least 256 bytes, which satisfies the
+        // `alignment()` requirement (max 16 bytes). The buffer contains `extent.value()` elements
+        // matching `self.extent`, ensuring sufficient capacity.
         unsafe { BucketStorageRef::new(self.extent, self.data().as_raw() as *const T) }
     }
 
@@ -382,6 +407,8 @@ where
         stream: &Stream,
         module: Option<&Module>,
     ) -> CudaResult<()> {
+        // Safety: We immediately synchronize after the call, ensuring the storage
+        // is fully initialized before returning.
         unsafe {
             self.initialize_async(value, stream, module)?;
         }
@@ -417,11 +444,18 @@ where
 
         // Try kernel-based initialization if module is available
         if let Some(module) = module {
+            // Safety: `self.buffer` is not accessed elsewhere during kernel execution (exclusive
+            // mutable access). The function's safety requirements ensure the caller synchronizes
+            // the stream before using the storage, guaranteeing the kernel completes before any reads/writes.
             return unsafe { Self::initialize_async_kernel(self, value, stream, module) };
         }
 
         // Fallback to host-to-device copy
         let host_data: Vec<T> = vec![value; capacity];
+        // Safety: `host_data` is a local vector that lives for the function duration and is not
+        // modified after creation. `self.buffer` is not accessed elsewhere during the copy.
+        // The function's safety requirements ensure the caller synchronizes the stream before
+        // using the storage, guaranteeing the copy completes before any reads/writes.
         unsafe {
             self.buffer.async_copy_from(&host_data, stream)?;
         }
@@ -430,6 +464,11 @@ where
     }
 
     /// Kernel-based initialization using the compiled PTX module.
+    ///
+    /// # Safety
+    /// The caller must synchronize the stream before using the storage. The kernel
+    /// will write to `self.buffer` asynchronously, and the storage is not valid until
+    /// the kernel completes.
     unsafe fn initialize_async_kernel(
         &mut self,
         value: T,
@@ -449,6 +488,12 @@ where
         let init_kernel = module.get_function("initialize_storage_slots")?;
 
         // Launch the kernel
+        // Safety: The kernel launch is safe because:
+        // - `self.buffer.as_device_ptr()` returns a valid device pointer to allocated memory
+        // - `sentinel_ptr` points to valid device memory containing the sentinel value
+        // - `size_of::<T>()` and `capacity` are correct values matching the buffer size
+        // - The kernel function signature matches the expected parameters
+        // - The launch configuration (grid_size, BLOCK_SIZE) is valid
         unsafe {
             launch!(init_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
                 self.buffer.as_device_ptr().as_raw() as *mut u8,

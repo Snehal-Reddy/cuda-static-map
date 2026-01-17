@@ -52,6 +52,12 @@ impl<Key> XXHash32<Key> {
     /// The caller must ensure that `bytes` contains enough data to read a `T` at the given `index`.
     /// Specifically, `bytes.len()` must be >= `index * size_of::<T>() + size_of::<T>()`.
     unsafe fn load_chunk<T: Copy>(bytes: &[u8], index: usize) -> T {
+        // Safety: `read_unaligned` requires:
+        // 1. Valid pointer: `bytes.as_ptr()` is valid (from a valid slice), and `add()` keeps it within bounds
+        // 2. Initialized memory: `bytes` comes from a valid `Key` reference, so all bytes are initialized
+        // 3. Readable memory: `bytes` is a valid slice, so the memory is readable
+        // 4. Sufficient size: The function's safety requirements guarantee `bytes.len() >= index * size_of::<T>() + size_of::<T>()`,
+        //    so there are at least `size_of::<T>()` bytes available starting at the computed pointer
         unsafe {
             let ptr = bytes.as_ptr().add(index * core::mem::size_of::<T>());
             core::ptr::read_unaligned(ptr as *const T)
@@ -69,6 +75,11 @@ impl<Key> XXHash32<Key> {
 
     pub fn compute_hash(&self, key: &Key) -> u32 {
         let size = core::mem::size_of::<Key>();
+        // Safety: `key` is a valid reference to a `Key` value. We reinterpret it as a byte slice
+        // of length `size_of::<Key>()`. This is safe because:
+        // - The pointer `key as *const Key as *const u8` is valid and points to the start of the Key
+        // - The size is exactly `size_of::<Key>()`, so the slice covers exactly one Key value
+        // - The slice is only used for reading bytes and doesn't outlive the key reference
         let bytes = unsafe { core::slice::from_raw_parts(key as *const Key as *const u8, size) };
 
         let mut h32: u32;
@@ -221,6 +232,12 @@ impl<Key> XXHash64<Key> {
     /// The caller must ensure that `bytes` contains enough data to read a `T` at the given `index`.
     /// Specifically, `bytes.len()` must be >= `index * size_of::<T>() + size_of::<T>()`.
     unsafe fn load_chunk<T: Copy>(bytes: &[u8], index: usize) -> T {
+        // Safety: `read_unaligned` requires:
+        // 1. Valid pointer: `bytes.as_ptr()` is valid (from a valid slice), and `add()` keeps it within bounds
+        // 2. Initialized memory: `bytes` comes from a valid `Key` reference, so all bytes are initialized
+        // 3. Readable memory: `bytes` is a valid slice, so the memory is readable
+        // 4. Sufficient size: The function's safety requirements guarantee `bytes.len() >= index * size_of::<T>() + size_of::<T>()`,
+        //    so there are at least `size_of::<T>()` bytes available starting at the computed pointer
         unsafe {
             let ptr = bytes.as_ptr().add(index * core::mem::size_of::<T>());
             core::ptr::read_unaligned(ptr as *const T)
@@ -238,6 +255,11 @@ impl<Key> XXHash64<Key> {
 
     pub fn compute_hash(&self, key: &Key) -> u64 {
         let size = core::mem::size_of::<Key>();
+        // Safety: `key` is a valid reference to a `Key` value. We reinterpret it as a byte slice
+        // of length `size_of::<Key>()`. This is safe because:
+        // - The pointer `key as *const Key as *const u8` is valid and points to the start of the Key
+        // - The size is exactly `size_of::<Key>()`, so the slice covers exactly one Key value
+        // - The slice is only used for reading bytes and doesn't outlive the key reference
         let bytes = unsafe { core::slice::from_raw_parts(key as *const Key as *const u8, size) };
 
         let mut h64: u64;

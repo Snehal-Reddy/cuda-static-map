@@ -46,7 +46,9 @@ impl ProbingIterator {
     }
 }
 
-// Ensure ProbingIterator is device-compatible
+// Safety: ProbingIterator contains only primitive types (usize fields) and no references
+// or pointers. All fields (curr_index, step_size, upper_bound) are trivially copyable
+// and safe to copy to/from CUDA device memory.
 unsafe impl DeviceCopy for ProbingIterator {}
 
 /// Trait for probing schemes that define collision resolution strategies.
@@ -213,6 +215,11 @@ where
     }
 }
 
+// Safety: LinearProbing contains:
+// - `hasher: Hasher` which implements DeviceCopy (by trait bound)
+// - `_phantom: PhantomData<Key>` which is a zero-sized type
+// Both fields are trivially copyable and contain no references to CPU memory.
+// The Key type parameter is only used in PhantomData, which doesn't affect memory layout.
 unsafe impl<Key, Hasher> DeviceCopy for LinearProbing<Key, Hasher>
 where
     Hasher: Copy + DeviceCopy,
@@ -334,6 +341,12 @@ where
     }
 }
 
+// Safety: DoubleHashProbing contains:
+// - `hasher1: Hasher1` which implements DeviceCopy (by trait bound)
+// - `hasher2: Hasher2` which implements DeviceCopy (by trait bound)
+// - `_phantom: PhantomData<Key>` which is a zero-sized type
+// All fields are trivially copyable and contain no references to CPU memory.
+// The Key type parameter is only used in PhantomData, which doesn't affect memory layout.
 unsafe impl<Key, Hasher1, Hasher2> DeviceCopy for DoubleHashProbing<Key, Hasher1, Hasher2>
 where
     Hasher1: Hash<Key> + Copy + DeviceCopy,
