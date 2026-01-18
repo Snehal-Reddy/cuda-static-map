@@ -13,6 +13,7 @@ pub mod hash;
 pub mod pair;
 pub mod probing;
 pub mod storage;
+pub mod open_addressing;
 pub mod static_map;
 pub mod static_map_ref;
 
