@@ -1,7 +1,57 @@
 //! Open addressing primitives and abstractions.
-//!
-//! This module provides the `KeyEqual` trait and `EqualWrapper` for
-//! handling key comparisons and sentinel values in open addressing schemes.
+
+/// Thread scope for atomic operations.
+///
+/// This enum is used as a const generic parameter to control the scope of
+/// atomic operations (e.g., system-wide, device-wide, block-wide).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, core::marker::ConstParamTy)]
+pub enum ThreadScope {
+    /// System-wide scope (GPU + CPU via zero-copy memory).
+    ///
+    /// Use this scope when:
+    /// - Using zero-copy memory accessible from both CPU and GPU
+    /// - Maximum compatibility is required across all memory spaces
+    /// - Performance is less critical than correctness
+    ///
+    /// **Note**: This is the widest scope and may have the highest overhead.
+    System,
+    
+    /// Device-wide scope (all threads on the GPU).
+    ///
+    /// **Recommended default** for most use cases.
+    ///
+    /// Use this scope when:
+    /// - All operations are within a single GPU device
+    /// - Best balance of performance and correctness
+    /// - Most common case for `static_map` operations
+    ///
+    /// This is the default scope for `StaticMap` and provides good
+    /// performance while maintaining correctness guarantees.
+    Device,
+    
+    /// Block-wide scope (all threads in the same block).
+    ///
+    /// Use this scope when:
+    /// - Operations are guaranteed to be within a single thread block
+    /// - Maximum performance is needed within a block
+    /// - You can guarantee block-level synchronization (e.g., via barriers)
+    ///
+    /// **Warning**: Incorrect use can lead to data races if threads from
+    /// different blocks access the same memory locations.
+    Block,
+    
+    /// Thread scope (no atomicity relative to other threads).
+    ///
+    /// Use this scope when:
+    /// - Each thread operates on distinct memory locations
+    /// - No cross-thread synchronization is needed
+    /// - Volatile operations are sufficient for compiler optimization prevention
+    ///
+    /// **Warning**: This scope provides no atomicity guarantees. Only use
+    /// when you can guarantee that no two threads will access the same
+    /// memory location concurrently.
+    Thread,
+}
 
 /// Enum of equality comparison results.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

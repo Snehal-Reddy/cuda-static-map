@@ -4,6 +4,7 @@
 //! - For GPU: compiled to PTX via cuda_builder with --target=nvptx64-nvidia-cuda
 
 #![feature(generic_const_exprs)]
+#![feature(adt_const_params)]
 #![allow(incomplete_features)]
 
 #[cfg(target_arch = "nvptx64")]

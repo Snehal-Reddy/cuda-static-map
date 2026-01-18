@@ -554,6 +554,7 @@ where
 /// - CAS + dependent write: Alternative strategy for larger types
 #[cfg(target_arch = "nvptx64")]
 pub mod atomic_ops {
+    use crate::open_addressing::ThreadScope;
     use core::sync::atomic::Ordering;
     use cuda_std::atomic::mid;
 
@@ -561,6 +562,9 @@ pub mod atomic_ops {
     ///
     /// This uses a single atomic operation on the entire value by reinterpreting
     /// it as u32 (for 4 bytes) or u64 (for 8 bytes)
+    ///
+    /// # Type Parameters
+    /// * `SCOPE` - The thread scope for the atomic operation (System, Device, Block, Thread).
     ///
     /// # Arguments
     /// * `address` - Pointer to the slot value
@@ -572,9 +576,16 @@ pub mod atomic_ops {
     /// `true` if the swap succeeded, `false` otherwise. Returns `false` if `size` is not 4 or 8.
     ///
     /// # Safety
-    /// - `address` must point to valid device memory and be properly aligned
-    /// - `expected` and `desired` must be valid bit patterns for the value type
-    pub unsafe fn packed_cas(
+    /// * `address` must point to valid device memory.
+    /// * If `size` is 4, `address` must be 4-byte aligned.
+    /// * If `size` is 8, `address` must be 8-byte aligned.
+    /// * `expected` and `desired` must be valid bit patterns for the value type
+    /// * When `SCOPE` is `ThreadScope::Thread`, each thread must operate on distinct
+    ///   memory locations (no concurrent access to the same location by multiple threads).
+    ///   Volatile operations are used which prevent compiler reordering but provide no
+    ///   cross-thread synchronization guarantees.
+    #[inline(always)]
+    pub unsafe fn packed_cas<const SCOPE: ThreadScope>(
         address: *mut u8,
         expected: u64,
         desired: u64,
@@ -582,30 +593,74 @@ pub mod atomic_ops {
     ) -> bool {
         match size {
             4 => {
-                // Safety: address is valid and aligned per function safety requirements
                 let slot_ptr = address as *mut u32;
                 let expected_u32 = expected as u32;
                 let desired_u32 = desired as u32;
-                let old = unsafe {
-                    mid::atomic_compare_and_swap_u32_device(
-                        slot_ptr,
-                        expected_u32,
-                        desired_u32,
-                        Ordering::Relaxed, // TODO: Verify later if this is okay
-                    )
+
+                // Safety:
+                // 1. `slot_ptr` is derived from `address`.
+                // 2. Caller guarantees `address` is valid and 4-byte aligned when size is 4.
+                // 3. `mid` intrinsics require valid pointers and appropriate memory ordering.
+                let old = match SCOPE {
+                    ThreadScope::System => unsafe {
+                        mid::atomic_compare_and_swap_u32_system(
+                            slot_ptr, expected_u32, desired_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Device => unsafe {
+                        mid::atomic_compare_and_swap_u32_device(
+                            slot_ptr, expected_u32, desired_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Block => unsafe {
+                        mid::atomic_compare_and_swap_u32_block(
+                            slot_ptr, expected_u32, desired_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Thread => unsafe {
+                        // See safety requirements: each thread must operate on distinct memory locations.
+                        let current = core::ptr::read_volatile(slot_ptr);
+                        if current == expected_u32 {
+                            core::ptr::write_volatile(slot_ptr, desired_u32);
+                            expected_u32
+                        } else {
+                            current
+                        }
+                    },
                 };
                 old == expected_u32
             }
             8 => {
-                // Safety: address is valid and aligned per function safety requirements
                 let slot_ptr = address as *mut u64;
-                let old = unsafe {
-                    mid::atomic_compare_and_swap_u64_device(
-                        slot_ptr,
-                        expected,
-                        desired,
-                        Ordering::Relaxed, // TODO: Verify later if this is okay
-                    )
+
+                // Safety:
+                // 1. `slot_ptr` is derived from `address`.
+                // 2. Caller guarantees `address` is valid and 8-byte aligned when size is 8.
+                let old = match SCOPE {
+                    ThreadScope::System => unsafe {
+                        mid::atomic_compare_and_swap_u64_system(
+                            slot_ptr, expected, desired, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Device => unsafe {
+                        mid::atomic_compare_and_swap_u64_device(
+                            slot_ptr, expected, desired, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Block => unsafe {
+                        mid::atomic_compare_and_swap_u64_block(
+                            slot_ptr, expected, desired, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Thread => unsafe {
+                        let current = core::ptr::read_volatile(slot_ptr);
+                        if current == expected {
+                            core::ptr::write_volatile(slot_ptr, desired);
+                            expected
+                        } else {
+                            current
+                        }
+                    },
                 };
                 old == expected
             }
@@ -618,8 +673,7 @@ pub mod atomic_ops {
     /// First CAS the key, then CAS the value if successful.
     ///
     /// # Type Parameters
-    /// * `Key` - Key type (must be <= 8 bytes)
-    /// * `Value` - Value type (must be <= 8 bytes)
+    /// * `SCOPE` - The thread scope for the atomic operation.
     ///
     /// # Arguments
     /// * `key_ptr` - Pointer to the key field
@@ -636,9 +690,14 @@ pub mod atomic_ops {
     /// Returns `false` if `key_size` or `value_size` is not 4 or 8.
     ///
     /// # Safety
-    /// - Both pointers must point to valid device memory
-    /// - Both pointers must be properly aligned
-    pub unsafe fn back_to_back_cas(
+    /// * Both pointers must point to valid device memory
+    /// * Both pointers must be properly aligned for their respective sizes (4 or 8 bytes)
+    /// * When `SCOPE` is `ThreadScope::Thread`, each thread must operate on distinct
+    ///   memory locations (no concurrent access to the same location by multiple threads).
+    ///   Volatile operations are used which prevent compiler reordering but provide no
+    ///   cross-thread synchronization guarantees.
+    #[inline(always)]
+    pub unsafe fn back_to_back_cas<const SCOPE: ThreadScope>(
         key_ptr: *mut u8,
         value_ptr: *mut u8,
         expected_key: u64,
@@ -648,31 +707,71 @@ pub mod atomic_ops {
         key_size: usize,
         value_size: usize,
     ) -> bool {
-        // Safety: key_ptr is valid and aligned per function safety requirements
+        // First CAS the key
         let key_success = match key_size {
             4 => {
                 let key_ptr_u32 = key_ptr as *mut u32;
                 let expected_key_u32 = expected_key as u32;
                 let desired_key_u32 = desired_key as u32;
-                let old = unsafe {
-                    mid::atomic_compare_and_swap_u32_device(
-                        key_ptr_u32,
-                        expected_key_u32,
-                        desired_key_u32,
-                        Ordering::Relaxed,
-                    )
+
+                // Safety: Caller guarantees key_ptr is valid and 4-byte aligned.
+                let old = match SCOPE {
+                    ThreadScope::System => unsafe {
+                        mid::atomic_compare_and_swap_u32_system(
+                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Device => unsafe {
+                        mid::atomic_compare_and_swap_u32_device(
+                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Block => unsafe {
+                        mid::atomic_compare_and_swap_u32_block(
+                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Thread => unsafe {
+                        let current = core::ptr::read_volatile(key_ptr_u32);
+                        if current == expected_key_u32 {
+                            core::ptr::write_volatile(key_ptr_u32, desired_key_u32);
+                            expected_key_u32
+                        } else {
+                            current
+                        }
+                    },
                 };
                 old == expected_key_u32
             }
             8 => {
                 let key_ptr_u64 = key_ptr as *mut u64;
-                let old = unsafe {
-                    mid::atomic_compare_and_swap_u64_device(
-                        key_ptr_u64,
-                        expected_key,
-                        desired_key,
-                        Ordering::Relaxed,
-                    )
+
+                // Safety: Caller guarantees key_ptr is valid and 8-byte aligned.
+                let old = match SCOPE {
+                    ThreadScope::System => unsafe {
+                        mid::atomic_compare_and_swap_u64_system(
+                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Device => unsafe {
+                        mid::atomic_compare_and_swap_u64_device(
+                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Block => unsafe {
+                        mid::atomic_compare_and_swap_u64_block(
+                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Thread => unsafe {
+                        let current = core::ptr::read_volatile(key_ptr_u64);
+                        if current == expected_key {
+                            core::ptr::write_volatile(key_ptr_u64, desired_key);
+                            expected_key
+                        } else {
+                            current
+                        }
+                    },
                 };
                 old == expected_key
             }
@@ -683,24 +782,45 @@ pub mod atomic_ops {
             return false;
         }
 
-        // Safety: value_ptr is valid and aligned per function safety requirements
+        // Then CAS the value
         let mut value_success = false;
         let mut current_expected = expected_value;
-        
+
         while !value_success {
             value_success = match value_size {
                 4 => {
                     let value_ptr_u32 = value_ptr as *mut u32;
                     let expected_value_u32 = current_expected as u32;
                     let desired_value_u32 = desired_value as u32;
-                    let old = unsafe {
-                        mid::atomic_compare_and_swap_u32_device(
-                            value_ptr_u32,
-                            expected_value_u32,
-                            desired_value_u32,
-                            Ordering::Relaxed,
-                        )
+
+                    // Safety: Caller guarantees value_ptr is valid and 4-byte aligned.
+                    let old = match SCOPE {
+                        ThreadScope::System => unsafe {
+                            mid::atomic_compare_and_swap_u32_system(
+                                value_ptr_u32, expected_value_u32, desired_value_u32, Ordering::Relaxed
+                            )
+                        },
+                        ThreadScope::Device => unsafe {
+                            mid::atomic_compare_and_swap_u32_device(
+                                value_ptr_u32, expected_value_u32, desired_value_u32, Ordering::Relaxed
+                            )
+                        },
+                        ThreadScope::Block => unsafe {
+                            mid::atomic_compare_and_swap_u32_block(
+                                value_ptr_u32, expected_value_u32, desired_value_u32, Ordering::Relaxed
+                            )
+                        },
+                        ThreadScope::Thread => unsafe {
+                            let current = core::ptr::read_volatile(value_ptr_u32);
+                            if current == expected_value_u32 {
+                                core::ptr::write_volatile(value_ptr_u32, desired_value_u32);
+                                expected_value_u32
+                            } else {
+                                current
+                            }
+                        },
                     };
+
                     if old == expected_value_u32 {
                         true
                     } else {
@@ -710,14 +830,35 @@ pub mod atomic_ops {
                 }
                 8 => {
                     let value_ptr_u64 = value_ptr as *mut u64;
-                    let old = unsafe {
-                        mid::atomic_compare_and_swap_u64_device(
-                            value_ptr_u64,
-                            current_expected,
-                            desired_value,
-                            Ordering::Relaxed,
-                        )
+
+                    // Safety: Caller guarantees value_ptr is valid and 8-byte aligned.
+                    let old = match SCOPE {
+                        ThreadScope::System => unsafe {
+                            mid::atomic_compare_and_swap_u64_system(
+                                value_ptr_u64, current_expected, desired_value, Ordering::Relaxed
+                            )
+                        },
+                        ThreadScope::Device => unsafe {
+                            mid::atomic_compare_and_swap_u64_device(
+                                value_ptr_u64, current_expected, desired_value, Ordering::Relaxed
+                            )
+                        },
+                        ThreadScope::Block => unsafe {
+                            mid::atomic_compare_and_swap_u64_block(
+                                value_ptr_u64, current_expected, desired_value, Ordering::Relaxed
+                            )
+                        },
+                        ThreadScope::Thread => unsafe {
+                            let current = core::ptr::read_volatile(value_ptr_u64);
+                            if current == current_expected {
+                                core::ptr::write_volatile(value_ptr_u64, desired_value);
+                                current_expected
+                            } else {
+                                current
+                            }
+                        },
                     };
+
                     if old == current_expected {
                         true
                     } else {
@@ -736,6 +877,9 @@ pub mod atomic_ops {
     ///
     /// First CAS the key, then write the value if successful (non-atomic write).
     ///
+    /// # Type Parameters
+    /// * `SCOPE` - The thread scope for the atomic operation.
+    ///
     /// # Arguments
     /// * `key_ptr` - Pointer to the key field
     /// * `value_ptr` - Pointer to the value field
@@ -750,9 +894,15 @@ pub mod atomic_ops {
     /// Returns `false` if `key_size` is not 4 or 8.
     ///
     /// # Safety
-    /// - Both pointers must point to valid device memory
-    /// - Both pointers must be properly aligned
-    pub unsafe fn cas_dependent_write(
+    /// * Both pointers must point to valid device memory
+    /// * `key_ptr` must be aligned to 4 or 8 bytes depending on `key_size`.
+    /// * `value_ptr` must be properly aligned for `value_size`.
+    /// * When `SCOPE` is `ThreadScope::Thread`, each thread must operate on distinct
+    ///   memory locations (no concurrent access to the same location by multiple threads).
+    ///   Volatile operations are used which prevent compiler reordering but provide no
+    ///   cross-thread synchronization guarantees.
+    #[inline(always)]
+    pub unsafe fn cas_dependent_write<const SCOPE: ThreadScope>(
         key_ptr: *mut u8,
         value_ptr: *mut u8,
         expected_key: u64,
@@ -761,31 +911,71 @@ pub mod atomic_ops {
         key_size: usize,
         value_size: usize,
     ) -> bool {
-        // Safety: key_ptr is valid and aligned per function safety requirements
+        // First CAS the key
         let key_success = match key_size {
             4 => {
                 let key_ptr_u32 = key_ptr as *mut u32;
                 let expected_key_u32 = expected_key as u32;
                 let desired_key_u32 = desired_key as u32;
-                let old = unsafe {
-                    mid::atomic_compare_and_swap_u32_device(
-                        key_ptr_u32,
-                        expected_key_u32,
-                        desired_key_u32,
-                        Ordering::Relaxed,
-                    )
+
+                // Safety: Caller guarantees key_ptr is valid and 4-byte aligned.
+                let old = match SCOPE {
+                    ThreadScope::System => unsafe {
+                        mid::atomic_compare_and_swap_u32_system(
+                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Device => unsafe {
+                        mid::atomic_compare_and_swap_u32_device(
+                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Block => unsafe {
+                        mid::atomic_compare_and_swap_u32_block(
+                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Thread => unsafe {
+                        let current = core::ptr::read_volatile(key_ptr_u32);
+                        if current == expected_key_u32 {
+                            core::ptr::write_volatile(key_ptr_u32, desired_key_u32);
+                            expected_key_u32
+                        } else {
+                            current
+                        }
+                    },
                 };
                 old == expected_key_u32
             }
             8 => {
                 let key_ptr_u64 = key_ptr as *mut u64;
-                let old = unsafe {
-                    mid::atomic_compare_and_swap_u64_device(
-                        key_ptr_u64,
-                        expected_key,
-                        desired_key,
-                        Ordering::Relaxed,
-                    )
+
+                // Safety: Caller guarantees key_ptr is valid and 8-byte aligned.
+                let old = match SCOPE {
+                    ThreadScope::System => unsafe {
+                        mid::atomic_compare_and_swap_u64_system(
+                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Device => unsafe {
+                        mid::atomic_compare_and_swap_u64_device(
+                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Block => unsafe {
+                        mid::atomic_compare_and_swap_u64_block(
+                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                        )
+                    },
+                    ThreadScope::Thread => unsafe {
+                        let current = core::ptr::read_volatile(key_ptr_u64);
+                        if current == expected_key {
+                            core::ptr::write_volatile(key_ptr_u64, desired_key);
+                            expected_key
+                        } else {
+                            current
+                        }
+                    },
                 };
                 old == expected_key
             }
@@ -793,8 +983,10 @@ pub mod atomic_ops {
         };
 
         if key_success {
-            // Safety: value_ptr is valid and aligned per function safety requirements
-            // Key CAS succeeded, so we have exclusive access to write the value
+            // Write value non-atomically (exclusive access)
+            // Safety:
+            // 1. `key_success` being true implies we won the CAS, granting exclusive access.
+            // 2. Caller guarantees `value_ptr` is valid and properly aligned.
             unsafe {
                 match value_size {
                     4 => {
@@ -824,33 +1016,65 @@ pub mod atomic_ops {
     /// This is used when a key CAS succeeds but the value might not be written yet.
     /// Spins until the value is no longer the empty sentinel.
     ///
+    /// # Type Parameters
+    /// * `SCOPE` - The thread scope for the atomic operation.
+    ///
     /// # Arguments
     /// * `value_ptr` - Pointer to atomic value
     /// * `empty_value` - The empty sentinel value to wait for
     /// * `value_size` - Size of value in bytes (must be 4 or 8)
     ///
     /// # Safety
-    /// - `value_ptr` must point to valid device memory
-    /// - `value_ptr` must be properly aligned
-    /// - Value size must be 4 or 8
-    pub unsafe fn wait_for_payload(
+    /// * `value_ptr` must point to valid device memory.
+    /// * `value_ptr` must be properly aligned for `value_size` (4 or 8 bytes).
+    /// * When `SCOPE` is `ThreadScope::Thread`, each thread must operate on distinct
+    ///   memory locations (no concurrent access to the same location by multiple threads).
+    ///   Volatile operations are used which prevent compiler reordering but provide no
+    ///   cross-thread synchronization guarantees.
+    #[inline]
+    pub unsafe fn wait_for_payload<const SCOPE: ThreadScope>(
         value_ptr: *mut u8,
         empty_value: u64,
         value_size: usize,
     ) {
         loop {
-            // Safety: value_ptr is valid and aligned per function safety requirements
             let current = match value_size {
                 4 => {
                     let value_ptr_u32 = value_ptr as *mut u32;
-                    unsafe {
-                        mid::atomic_load_32_device(value_ptr_u32, Ordering::Acquire) as u64
+                    // Safety: Caller guarantees value_ptr is valid and 4-byte aligned.
+                    match SCOPE {
+                        ThreadScope::System => unsafe {
+                            mid::atomic_load_32_system(value_ptr_u32, Ordering::Acquire) as u64
+                        },
+                        ThreadScope::Device => unsafe {
+                            mid::atomic_load_32_device(value_ptr_u32, Ordering::Acquire) as u64
+                        },
+                        ThreadScope::Block => unsafe {
+                            mid::atomic_load_32_block(value_ptr_u32, Ordering::Acquire) as u64
+                        },
+                        ThreadScope::Thread => unsafe {
+                            // See safety requirements: each thread must operate on distinct memory locations.
+                            core::ptr::read_volatile(value_ptr_u32) as u64
+                        },
                     }
                 }
                 8 => {
                     let value_ptr_u64 = value_ptr as *mut u64;
-                    unsafe {
-                        mid::atomic_load_64_device(value_ptr_u64, Ordering::Acquire)
+                    // Safety: Caller guarantees value_ptr is valid and 8-byte aligned.
+                    match SCOPE {
+                        ThreadScope::System => unsafe {
+                            mid::atomic_load_64_system(value_ptr_u64, Ordering::Acquire)
+                        },
+                        ThreadScope::Device => unsafe {
+                            mid::atomic_load_64_device(value_ptr_u64, Ordering::Acquire)
+                        },
+                        ThreadScope::Block => unsafe {
+                            mid::atomic_load_64_block(value_ptr_u64, Ordering::Acquire)
+                        },
+                        ThreadScope::Thread => unsafe {
+                            // See safety requirements: each thread must operate on distinct memory locations.
+                            core::ptr::read_volatile(value_ptr_u64)
+                        },
                     }
                 }
                 _ => break,
@@ -860,21 +1084,26 @@ pub mod atomic_ops {
                 break;
             }
 
+            // Simple busy wait
             core::hint::spin_loop();
         }
     }
 }
 
 // Host-side placeholder implementations (for testing/development)
-// In hindsight, this is not needed since we are using the device-side implementations.
-// TODO: Remove this once we are sure these are not needed, and the device-side 
-// implementations are working and tested.
 #[cfg(not(target_arch = "nvptx64"))]
 pub mod atomic_ops {
+    use crate::open_addressing::ThreadScope;
     use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     /// Host-side placeholder for packed CAS.
-    pub unsafe fn packed_cas(
+    ///
+    /// Ignores `SCOPE` as standard Rust atomics don't support it directly.
+    ///
+    /// # Safety
+    /// * `address` must be valid and aligned.
+    #[inline]
+    pub unsafe fn packed_cas<const SCOPE: ThreadScope>(
         address: *mut u8,
         expected: u64,
         desired: u64,
@@ -882,8 +1111,8 @@ pub mod atomic_ops {
     ) -> bool {
         match size {
             4 => {
-                // Safety: address is valid and aligned per function safety requirements
                 let slot_ptr = address as *mut AtomicU32;
+                // Safety: address is valid and aligned per function safety requirements
                 let atomic = unsafe { &*slot_ptr };
                 atomic
                     .compare_exchange(
@@ -895,8 +1124,8 @@ pub mod atomic_ops {
                     .is_ok()
             }
             8 => {
-                // Safety: address is valid and aligned per function safety requirements
                 let slot_ptr = address as *mut AtomicU64;
+                // Safety: address is valid and aligned per function safety requirements
                 let atomic = unsafe { &*slot_ptr };
                 atomic
                     .compare_exchange(expected, desired, Ordering::Relaxed, Ordering::Relaxed)
@@ -907,7 +1136,13 @@ pub mod atomic_ops {
     }
 
     /// Host-side placeholder for back-to-back CAS.
-    pub unsafe fn back_to_back_cas(
+    ///
+    /// Ignores `SCOPE` as standard Rust atomics don't support it directly.
+    ///
+    /// # Safety
+    /// * Pointers must be valid and aligned.
+    #[inline]
+    pub unsafe fn back_to_back_cas<const SCOPE: ThreadScope>(
         key_ptr: *mut u8,
         value_ptr: *mut u8,
         expected_key: u64,
@@ -917,9 +1152,9 @@ pub mod atomic_ops {
         key_size: usize,
         value_size: usize,
     ) -> bool {
-        // Safety: key_ptr is valid and aligned per function safety requirements
         let key_success = match key_size {
             4 => {
+                // Safety: key_ptr is valid and aligned per function safety requirements
                 let key_atomic = unsafe { &*(key_ptr as *mut AtomicU32) };
                 key_atomic
                     .compare_exchange(
@@ -931,6 +1166,7 @@ pub mod atomic_ops {
                     .is_ok()
             }
             8 => {
+                // Safety: key_ptr is valid and aligned per function safety requirements
                 let key_atomic = unsafe { &*(key_ptr as *mut AtomicU64) };
                 key_atomic
                     .compare_exchange(expected_key, desired_key, Ordering::Relaxed, Ordering::Relaxed)
@@ -943,12 +1179,12 @@ pub mod atomic_ops {
             return false;
         }
 
-        // Safety: value_ptr is valid and aligned per function safety requirements
         let mut value_success = false;
         let mut current_expected = expected_value;
         while !value_success {
             value_success = match value_size {
                 4 => {
+                    // Safety: value_ptr is valid and aligned per function safety requirements
                     let value_atomic = unsafe { &*(value_ptr as *mut AtomicU32) };
                     match value_atomic.compare_exchange(
                         current_expected as u32,
@@ -964,6 +1200,7 @@ pub mod atomic_ops {
                     }
                 }
                 8 => {
+                    // Safety: value_ptr is valid and aligned per function safety requirements
                     let value_atomic = unsafe { &*(value_ptr as *mut AtomicU64) };
                     match value_atomic.compare_exchange(
                         current_expected,
@@ -986,7 +1223,13 @@ pub mod atomic_ops {
     }
 
     /// Host-side placeholder for CAS + dependent write.
-    pub unsafe fn cas_dependent_write(
+    ///
+    /// Ignores `SCOPE` as standard Rust atomics don't support it directly.
+    ///
+    /// # Safety
+    /// * Pointers must be valid and aligned.
+    #[inline]
+    pub unsafe fn cas_dependent_write<const SCOPE: ThreadScope>(
         key_ptr: *mut u8,
         value_ptr: *mut u8,
         expected_key: u64,
@@ -995,9 +1238,9 @@ pub mod atomic_ops {
         key_size: usize,
         value_size: usize,
     ) -> bool {
-        // Safety: key_ptr is valid and aligned per function safety requirements
         let key_success = match key_size {
             4 => {
+                // Safety: key_ptr is valid and aligned per function safety requirements
                 let key_atomic = unsafe { &*(key_ptr as *mut AtomicU32) };
                 key_atomic
                     .compare_exchange(
@@ -1009,6 +1252,7 @@ pub mod atomic_ops {
                     .is_ok()
             }
             8 => {
+                // Safety: key_ptr is valid and aligned per function safety requirements
                 let key_atomic = unsafe { &*(key_ptr as *mut AtomicU64) };
                 key_atomic
                     .compare_exchange(expected_key, desired_key, Ordering::Relaxed, Ordering::Relaxed)
@@ -1018,8 +1262,8 @@ pub mod atomic_ops {
         };
 
         if key_success {
-            // Safety: value_ptr is valid and aligned per function safety requirements
-            // Key CAS succeeded, so we have exclusive access to write the value
+            // Safety: key_success being true implies we won the CAS, granting exclusive access.
+            // Caller guarantees value_ptr is valid and properly aligned.
             unsafe {
                 match value_size {
                     4 => {
@@ -1043,15 +1287,26 @@ pub mod atomic_ops {
     }
 
     /// Host-side placeholder for wait-for-payload.
-    pub unsafe fn wait_for_payload(value_ptr: *mut u8, empty_value: u64, value_size: usize) {
+    ///
+    /// Ignores `SCOPE` as standard Rust atomics don't support it directly.
+    ///
+    /// # Safety
+    /// * Pointers must be valid and aligned.
+    #[inline]
+    pub unsafe fn wait_for_payload<const SCOPE: ThreadScope>(
+        value_ptr: *mut u8,
+        empty_value: u64,
+        value_size: usize
+    ) {
         loop {
-            // Safety: value_ptr is valid and aligned per function safety requirements
             let current = match value_size {
                 4 => {
+                    // Safety: value_ptr is valid and aligned per function safety requirements
                     let value_atomic = unsafe { &*(value_ptr as *mut AtomicU32) };
                     value_atomic.load(Ordering::Acquire) as u64
                 }
                 8 => {
+                    // Safety: value_ptr is valid and aligned per function safety requirements
                     let value_atomic = unsafe { &*(value_ptr as *mut AtomicU64) };
                     value_atomic.load(Ordering::Acquire)
                 }
@@ -1092,11 +1347,14 @@ mod device_kernel {
     ) {
         let idx = thread::index_1d() as usize;
         if idx < capacity {
+            // Safety: idx is within capacity, so the offset is within the slots allocation.
             let dest = unsafe { slots.add(idx * slot_size) };
+
+            // Safety: slots and sentinel_bytes are distinct buffers of at least slot_size,
+            // and u8 pointers are always aligned.
             unsafe {
                 core::ptr::copy_nonoverlapping(sentinel_bytes, dest, slot_size);
             }
         }
     }
 }
-
