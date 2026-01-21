@@ -12,6 +12,7 @@ cust_core = { path = "../rust-cuda/crates/cust_core" }
 
 [target.'cfg(not(target_arch = "nvptx64"))'.dependencies]
 cust = { path = "../rust-cuda/crates/cust" }
+cust_raw = { path = "../rust-cuda/crates/cust_raw", default-features = false, features = ["driver"] }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

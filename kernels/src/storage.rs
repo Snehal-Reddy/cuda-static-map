@@ -12,10 +12,11 @@
 //! - `BucketStorage<T, BUCKET_SIZE>`: Host-side storage with device memory allocation
 //! - Atomic operations: Helpers for device-side concurrent operations
 
+use crate::open_addressing::ThreadScope;
 use crate::probing::ProbingScheme;
 
 #[cfg(not(target_arch = "nvptx64"))]
-use cust::error::CudaResult;
+use cust::error::{CudaError, CudaResult};
 #[cfg(not(target_arch = "nvptx64"))]
 use cust::launch;
 #[cfg(not(target_arch = "nvptx64"))]
@@ -25,9 +26,17 @@ use cust::module::Module;
 #[cfg(not(target_arch = "nvptx64"))]
 use cust::stream::Stream;
 #[cfg(not(target_arch = "nvptx64"))]
+use cust_raw::driver_sys;
+#[cfg(not(target_arch = "nvptx64"))]
 use std::mem::size_of;
 
+#[cfg(not(target_arch = "nvptx64"))]
+use core::sync::atomic::{AtomicU32, AtomicU64};
 use core::marker::PhantomData;
+use core::sync::atomic::Ordering;
+#[cfg(target_arch = "nvptx64")]
+use cuda_std::atomic::mid;
+
 use cust_core::DeviceCopy;
 
 // Include the compile-time generated primes array
@@ -542,6 +551,388 @@ where
     /// Reference to the device buffer
     pub fn as_buffer(&self) -> &DeviceBuffer<T> {
         &self.buffer
+    }
+}
+
+/// atomic reference wrapper.
+///
+/// This struct wraps a raw pointer and provides atomic operations.
+/// It uses `cuda_std` intrinsics on device and standard atomics on host.
+pub struct AtomicRef<'a, T, const SCOPE: ThreadScope> {
+    ptr: *mut T,
+    _phantom: PhantomData<&'a T>,
+}
+
+impl<'a, T, const SCOPE: ThreadScope> AtomicRef<'a, T, SCOPE> {
+    /// Creates a new `AtomicRef` from a raw pointer.
+    ///
+    /// # Safety
+    /// The pointer must be valid and properly aligned for atomic operations.
+    pub const unsafe fn new(ptr: *mut T) -> Self {
+        Self { ptr, _phantom: PhantomData }
+    }
+}
+
+#[cfg(target_arch = "nvptx64")]
+impl<'a, const SCOPE: ThreadScope> AtomicRef<'a, u32, SCOPE> {
+    /// Atomically adds a value to the current value.
+    #[inline(always)]
+    pub fn fetch_add(&self, val: u32, order: Ordering) -> u32 {
+        unsafe {
+            // Safety: from `cuda_std::atomic::mid` — pointer must be valid device
+            // memory for `u32`, 4-byte aligned, and initialized; ordering must match
+            // intended sync; `ThreadScope::Thread` requires no cross-thread aliasing
+            // (volatile). `AtomicRef::new` is unsafe and expects the caller to supply
+            // such a pointer; we forward ordering/scope unchanged.
+            match SCOPE {
+                 ThreadScope::System => mid::atomic_fetch_add_u32_system(self.ptr, order, val),
+                 ThreadScope::Device => mid::atomic_fetch_add_u32_device(self.ptr, order, val),
+                 ThreadScope::Block => mid::atomic_fetch_add_u32_block(self.ptr, order, val),
+                 ThreadScope::Thread => {
+                     let old = core::ptr::read_volatile(self.ptr);
+                     core::ptr::write_volatile(self.ptr, old.wrapping_add(val));
+                     old
+                 }
+            }
+        }
+    }
+
+    /// Atomically loads the value.
+    #[inline(always)]
+    pub fn load(&self, order: Ordering) -> u32 {
+        unsafe {
+            // Safety: same as `fetch_add` — valid, 4-byte aligned, initialized `u32`
+            // pointer; caller-chosen ordering/scope; no aliasing under
+            // `ThreadScope::Thread` (volatile load).
+            match SCOPE {
+                ThreadScope::System => mid::atomic_load_32_system(self.ptr, order),
+                ThreadScope::Device => mid::atomic_load_32_device(self.ptr, order),
+                ThreadScope::Block => mid::atomic_load_32_block(self.ptr, order),
+                ThreadScope::Thread => core::ptr::read_volatile(self.ptr),
+            }
+        }
+    }
+
+    /// Atomically stores a value.
+    #[inline(always)]
+    pub fn store(&self, val: u32, order: Ordering) {
+        unsafe {
+            // Safety: same as above — valid, 4-byte aligned, initialized pointer;
+            // caller-selected ordering/scope; no aliasing for `ThreadScope::Thread`
+            // (volatile store).
+            match SCOPE {
+                ThreadScope::System => mid::atomic_store_32_system(self.ptr, order, val),
+                ThreadScope::Device => mid::atomic_store_32_device(self.ptr, order, val),
+                ThreadScope::Block => mid::atomic_store_32_block(self.ptr, order, val),
+                ThreadScope::Thread => core::ptr::write_volatile(self.ptr, val),
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "nvptx64"))]
+impl<'a, const SCOPE: ThreadScope> AtomicRef<'a, u32, SCOPE> {
+    /// Atomically adds a value to the current value (Host fallback).
+    #[inline(always)]
+    pub fn fetch_add(&self, val: u32, order: Ordering) -> u32 {
+        // Safety: Creating a reference from `self.ptr` is safe because:
+        // 1. `AtomicRef::new()` requires the pointer to be valid (not null, not dangling)
+        //    and properly aligned for atomic operations, which guarantees 4-byte alignment
+        //    required for `AtomicU32`.
+        // 2. `u32` and `AtomicU32` have the same size and alignment (guaranteed by Rust
+        //    standard library), so the cast from `*mut u32` to `*const AtomicU32` is valid.
+        // 3. The memory must be initialized (required for atomic operations to work correctly),
+        //    which is the caller's responsibility when creating the `AtomicRef`.
+        // 4. The reference lifetime is scoped to this function call, so it cannot outlive
+        //    the memory it points to.
+        unsafe {
+            let atomic = &*(self.ptr as *const AtomicU32);
+            atomic.fetch_add(val, order)
+        }
+    }
+
+    /// Atomically loads the value (Host fallback).
+    #[inline(always)]
+    pub fn load(&self, order: Ordering) -> u32 {
+        unsafe {
+            // Safety: Host fallback uses `AtomicU32`; caller must supply a valid,
+            // 4-byte aligned, initialized pointer. Ordering is forwarded unchanged.
+            // `AtomicRef::new` is unsafe and relies on the caller for those guarantees.
+            let atomic = &*(self.ptr as *const AtomicU32);
+            atomic.load(order)
+        }
+    }
+
+    /// Atomically stores a value (Host fallback).
+    #[inline(always)]
+    pub fn store(&self, val: u32, order: Ordering) {
+        unsafe {
+            // Safety: Same as `load`: valid, 4-byte aligned, initialized `u32`
+            // pointer supplied by the caller; ordering forwarded unchanged.
+            let atomic = &*(self.ptr as *const AtomicU32);
+            atomic.store(val, order)
+        }
+    }
+}
+
+#[cfg(target_arch = "nvptx64")]
+impl<'a, const SCOPE: ThreadScope> AtomicRef<'a, u64, SCOPE> {
+    /// Atomically adds a value to the current value.
+    ///
+    /// # Safety
+    /// From `cuda_std::atomic::mid` requirements: pointer must be valid device
+    /// memory for `u64`, 8-byte aligned, and initialized; ordering must match
+    /// intended synchronization; for `ThreadScope::Thread`, no cross-thread
+    /// aliasing (volatile-only). `AtomicRef::new` is unsafe and expects the
+    /// caller to provide a valid, aligned pointer; storage initialization
+    /// satisfies initialization; we forward ordering/scope unchanged.
+    #[inline(always)]
+    pub fn fetch_add(&self, val: u64, order: Ordering) -> u64 {
+        unsafe {
+            match SCOPE {
+                 ThreadScope::System => mid::atomic_fetch_add_u64_system(self.ptr, order, val),
+                 ThreadScope::Device => mid::atomic_fetch_add_u64_device(self.ptr, order, val),
+                 ThreadScope::Block => mid::atomic_fetch_add_u64_block(self.ptr, order, val),
+                 ThreadScope::Thread => {
+                     let old = core::ptr::read_volatile(self.ptr);
+                     core::ptr::write_volatile(self.ptr, old.wrapping_add(val));
+                     old
+                 }
+            }
+        }
+    }
+
+    /// Atomically loads the value.
+    ///
+    /// # Safety
+    /// Same preconditions as `fetch_add`: valid device pointer, 8-byte
+    /// alignment, initialized `u64`, appropriate ordering/scope, and no
+    /// aliasing under `ThreadScope::Thread` (volatile load).
+    #[inline(always)]
+    pub fn load(&self, order: Ordering) -> u64 {
+        unsafe {
+            match SCOPE {
+                ThreadScope::System => mid::atomic_load_64_system(self.ptr, order),
+                ThreadScope::Device => mid::atomic_load_64_device(self.ptr, order),
+                ThreadScope::Block => mid::atomic_load_64_block(self.ptr, order),
+                ThreadScope::Thread => core::ptr::read_volatile(self.ptr),
+            }
+        }
+    }
+
+    /// Atomically stores a value.
+    ///
+    /// # Safety
+    /// Same as above: valid device pointer, 8-byte alignment, initialized
+    /// storage, appropriate ordering/scope, and no aliasing under
+    /// `ThreadScope::Thread` (volatile store).
+    #[inline(always)]
+    pub fn store(&self, val: u64, order: Ordering) {
+        unsafe {
+            match SCOPE {
+                ThreadScope::System => mid::atomic_store_64_system(self.ptr, order, val),
+                ThreadScope::Device => mid::atomic_store_64_device(self.ptr, order, val),
+                ThreadScope::Block => mid::atomic_store_64_block(self.ptr, order, val),
+                ThreadScope::Thread => core::ptr::write_volatile(self.ptr, val),
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "nvptx64"))]
+impl<'a, const SCOPE: ThreadScope> AtomicRef<'a, u64, SCOPE> {
+    /// Atomically adds a value to the current value (Host fallback).
+    #[inline(always)]
+    pub fn fetch_add(&self, val: u64, order: Ordering) -> u64 {
+        // Safety: Creating a reference from `self.ptr` is safe because:
+        // 1. `AtomicRef::new()` requires the pointer to be valid (not null, not dangling)
+        //    and properly aligned for atomic operations, which guarantees 8-byte alignment
+        //    required for `AtomicU64`.
+        // 2. `u64` and `AtomicU64` have the same size and alignment (guaranteed by Rust
+        //    standard library), so the cast from `*mut u64` to `*const AtomicU64` is valid.
+        // 3. The memory must be initialized (required for atomic operations to work correctly),
+        //    which is the caller's responsibility when creating the `AtomicRef`.
+        // 4. The reference lifetime is scoped to this function call, so it cannot outlive
+        //    the memory it points to.
+        unsafe {
+            let atomic = &*(self.ptr as *const AtomicU64);
+            atomic.fetch_add(val, order)
+        }
+    }
+
+    /// Atomically loads the value (Host fallback).
+    #[inline(always)]
+    pub fn load(&self, order: Ordering) -> u64 {
+        unsafe {
+            // Safety: Host fallback uses `AtomicU64`; pointer must be valid, 8-byte
+            // aligned, and initialized. `AtomicRef::new` is unsafe and expects the
+            // caller to provide such a pointer. Ordering is forwarded unchanged.
+            let atomic = &*(self.ptr as *const AtomicU64);
+            atomic.load(order)
+        }
+    }
+
+    /// Atomically stores a value (Host fallback).
+    #[inline(always)]
+    pub fn store(&self, val: u64, order: Ordering) {
+        unsafe {
+            // Safety: Same as `load`: valid, 8-byte aligned, initialized `u64` pointer
+            // supplied by the caller; ordering forwarded unchanged.
+            let atomic = &*(self.ptr as *const AtomicU64);
+            atomic.store(val, order)
+        }
+    }
+}
+
+/// Device-side reference to counter storage.
+///
+/// This struct acts as a lightweight reference to the counter storage on the device.
+/// It provides access to the atomic counter via `data()`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CounterStorageRef<T, const SCOPE: ThreadScope> {
+    ptr: *mut T,
+    _phantom: PhantomData<T>,
+}
+
+unsafe impl<T: Copy, const SCOPE: ThreadScope> DeviceCopy for CounterStorageRef<T, SCOPE> {}
+
+impl<T, const SCOPE: ThreadScope> CounterStorageRef<T, SCOPE> {
+    /// Creates a new `CounterStorageRef`.
+    ///
+    /// # Safety
+    /// `ptr` must point to valid device memory.
+    pub const unsafe fn new(ptr: *mut T) -> Self {
+        Self { ptr, _phantom: PhantomData }
+    }
+
+    /// Gets an atomic reference to the counter.
+    ///
+    /// # Returns
+    /// An `AtomicRef` wrapper for atomic operations.
+    pub fn data<'a>(&self) -> AtomicRef<'a, T, SCOPE> {
+        unsafe {
+            // Safety: `self.ptr` is valid and properly aligned because `CounterStorageRef`
+            // is only created via `CounterStorage::storage_ref()`, which uses a valid device
+            // pointer from `DeviceBuffer::as_device_ptr()`. Device buffers guarantee valid,
+            // properly aligned pointers for their element type.
+            AtomicRef::new(self.ptr)
+        }
+    }
+}
+
+/// Counter storage for atomic counting operations.
+///
+/// This struct manages a device buffer for storing a single atomic counter.
+/// It provides methods to reset the counter and load the value to the host.
+///
+/// # Type Parameters
+/// * `T` - The counter type (e.g., `usize`, `u64`, `u32`)
+/// * `SCOPE` - Thread scope for atomic operations (default: `Device`)
+#[cfg(not(target_arch = "nvptx64"))]
+pub struct CounterStorage<T: DeviceCopy, const SCOPE: ThreadScope = { ThreadScope::Device }> {
+    buffer: DeviceBuffer<T>,
+}
+
+/// Helper function to convert CUDA driver error to CudaError
+#[cfg(not(target_arch = "nvptx64"))]
+fn cuda_error_from_enum(err: cust_raw::driver_sys::cudaError_enum) -> CudaError {
+    use cust_raw::driver_sys::cudaError_enum;
+    match err {
+        cudaError_enum::CUDA_SUCCESS => unreachable!(),
+        cudaError_enum::CUDA_ERROR_INVALID_VALUE => CudaError::InvalidValue,
+        cudaError_enum::CUDA_ERROR_OUT_OF_MEMORY => CudaError::OutOfMemory,
+        cudaError_enum::CUDA_ERROR_NOT_INITIALIZED => CudaError::NotInitialized,
+        cudaError_enum::CUDA_ERROR_DEINITIALIZED => CudaError::Deinitialized,
+        cudaError_enum::CUDA_ERROR_INVALID_CONTEXT => CudaError::InvalidContext,
+        cudaError_enum::CUDA_ERROR_INVALID_DEVICE => CudaError::InvalidDevice,
+        _ => CudaError::UnknownError,
+    }
+}
+
+#[cfg(not(target_arch = "nvptx64"))]
+impl<T, const SCOPE: ThreadScope> CounterStorage<T, SCOPE>
+where
+    T: DeviceCopy + Default + Clone,
+{
+    /// Creates a new counter storage.
+    ///
+    /// # Arguments
+    /// * `stream` - CUDA stream for allocation
+    pub fn new(stream: &Stream) -> CudaResult<Self> {
+        // Allocate a single element buffer
+        let buffer = unsafe { DeviceBuffer::uninitialized_async(1, stream)? };
+        Ok(Self { buffer })
+    }
+
+    /// Resets the counter to zero.
+    ///
+    /// # Arguments
+    /// * `stream` - CUDA stream for the operation
+    ///
+    /// # Safety
+    /// - `stream` must be a valid CUDA stream.
+    /// - The memset is enqueued asynchronously; callers must ensure the stream completes
+    ///   before reading the counter on host or device (e.g., synchronize or use stream ordering).
+    /// - `T` must have the same size as its atomic representation (typically `u32` or `u64`).
+    ///   This ensures that `cuMemsetD8Async` correctly zeros the atomic counter value.
+    pub unsafe fn reset(&mut self, stream: &Stream) -> CudaResult<()> {
+        // SAFETY: `cuMemsetD8Async` requirements are met:
+        // - Pointer: `self.buffer` owns a single-element `DeviceBuffer<T>`, so
+        //   `as_device_ptr().as_raw()` points to `size_of::<T>()` bytes of valid device memory.
+        // - Size: we pass `size_of::<T>()` (exact allocation for one element); guarded against ZSTs.
+        // - Stream: `stream.as_inner()` yields a valid `CUstream`.
+        // - Host aliasing: `&mut self` ensures exclusive host access during enqueue.
+        unsafe {
+            if size_of::<T>() != 0 {
+                let result = driver_sys::cuMemsetD8Async(
+                    self.buffer.as_device_ptr().as_raw(),
+                    0,
+                    size_of::<T>(),
+                    stream.as_inner(),
+                );
+                match result {
+                    driver_sys::cudaError_enum::CUDA_SUCCESS => Ok(()),
+                    e => Err(cuda_error_from_enum(e)),
+                }?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Loads the counter value to the host.
+    ///
+    /// # Arguments
+    /// * `stream` - CUDA stream for the operation
+    ///
+    /// # Returns
+    /// The counter value on the host
+    pub fn load_to_host(&self, stream: &Stream) -> CudaResult<T> {
+        let mut host_val = vec![T::default()];
+        // Safety: buffer has size 1, host_val has size 1. Pointers are valid.
+        unsafe {
+            self.buffer.async_copy_to(&mut host_val, stream)?;
+        }
+        stream.synchronize()?;
+        Ok(host_val[0])
+    }
+
+    /// Gets a device pointer to the counter.
+    ///
+    /// # Returns
+    /// Device pointer to the counter
+    pub fn data(&self) -> DevicePointer<T> {
+        self.buffer.as_device_ptr()
+    }
+
+    /// Gets a storage reference for device access.
+    ///
+    /// # Returns
+    /// A `CounterStorageRef` that can be passed to CUDA kernels.
+    pub fn storage_ref(&self) -> CounterStorageRef<T, SCOPE> {
+        // Safety: data() returns a valid device pointer.
+        // The pointer is valid for the lifetime of self.
+        unsafe { CounterStorageRef::new(self.data().as_raw() as *mut T) }
     }
 }
 

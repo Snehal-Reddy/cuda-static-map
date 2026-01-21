@@ -431,6 +431,7 @@ dependencies = [
  "cuda_std",
  "cust",
  "cust_core",
+ "cust_raw",
  "primal",
 ]
 
