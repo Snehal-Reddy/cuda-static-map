@@ -494,7 +494,10 @@ where
         let extent = make_valid_extent_for_scheme(capacity, &probing_scheme, BUCKET_SIZE);
 
         // Allocate storage
-        let mut storage = BucketStorage::new(extent, stream)?;
+        // Safety: We call initialize_async below before returning, so storage is initialized
+        // before any read.
+        // extent.value() is from make_valid_extent_for_scheme and is a valid capacity.
+        let mut storage = unsafe { BucketStorage::new(extent, stream)? };
 
         // Initialize storage with empty sentinel
         // Safety: We return the object, so it's the caller's responsibility to synchronize
@@ -691,7 +694,10 @@ where
 
         loop {
             let bucket_idx = iter.current() / BUCKET_SIZE;
-            let bucket_ptr = self.storage_ref.get_bucket(bucket_idx);
+            // Safety: the probing iterator yields slot indices in `[0, capacity)`, so
+            // `bucket_idx = iter.current() / BUCKET_SIZE` is strictly less than
+            // `capacity / BUCKET_SIZE == num_buckets()`.
+            let bucket_ptr = unsafe { self.storage_ref.get_bucket(bucket_idx) };
 
             // Iterate over slots in the bucket
             for i in 0..BUCKET_SIZE {
@@ -737,8 +743,8 @@ where
                             };
 
                             // Safety:
-                            // - `val_ptr` is derived from `slot_ptr` (aligned, in-bounds `Pair<Key, Value>` obtained via
-                            //   `get_bucket`), so it is valid and aligned for `Value`.
+                            // - `val_ptr` is derived from `slot_ptr` (aligned, in-bounds `Pair<Key, Value>`; we ensure
+                            //   `bucket_idx < num_buckets()` at the `get_bucket` call above), so it is valid and aligned for `Value`.
                             // - `empty_val_u64` copies up to `val_size.min(8)` bytes from the valid
                             //   `self.empty_slot_sentinel.second` into a local `u64`; the copy is bounded and
                             //   non-overlapping.
@@ -759,8 +765,8 @@ where
                         }
 
                         // Safety:
-                        // - `slot_ptr` points to an in-bounds, properly aligned `Pair<Key, Value>` obtained via
-                        //   `get_bucket`, so dereferencing it is valid.
+                        // - `slot_ptr` points to an in-bounds, properly aligned `Pair<Key, Value>`; we ensure
+                        //   `bucket_idx < num_buckets()` at the `get_bucket` call above, so dereferencing it is valid.
                         // - We only read `second`; no mutable alias exists at this point, so the shared reference rules
                         //   are respected. Copying out the `Value` (which is `Copy`) is safe.
                         let final_val = unsafe { (*slot_ptr).second };
@@ -806,12 +812,15 @@ where
 
         loop {
             let bucket_idx = iter.current() / BUCKET_SIZE;
-            let bucket_ptr = self.storage_ref.get_bucket(bucket_idx);
+            // Safety: the probing iterator yields slot indices in `[0, capacity)`, so
+            // `bucket_idx = iter.current() / BUCKET_SIZE` is strictly less than
+            // `capacity / BUCKET_SIZE == num_buckets()`.
+            let bucket_ptr = unsafe { self.storage_ref.get_bucket(bucket_idx) };
 
             for i in 0..BUCKET_SIZE {
                 // Safety (pointer math/cast):
-                // - `bucket_ptr` was produced by `storage_ref.get_bucket`, which guarantees
-                //   a properly aligned bucket base within the allocated backing array.
+                // - `bucket_idx < num_buckets()` (see safety comment at `get_bucket` call above), so
+                //   `bucket_ptr` is a properly aligned bucket base within the allocated backing array.
                 // - `i` is bounded by `0..BUCKET_SIZE`, so `bucket_ptr.add(i)` stays within
                 //   that bucket.
                 // - We cast to `*mut` because we may write the slot later, but the map
@@ -835,9 +844,9 @@ where
                         let success = if pair_size <= 8 {
                             // Packed CAS
                             // Safety:
-                            // - `slot_u8` points into `slot_ptr` derived from `bucket_ptr` obtained via
-                            //   `get_bucket`, so it is in-bounds, properly aligned for `Pair<Key, Value>`, and
-                            //   thus aligned for `pair_size` bytes.
+                            // - `slot_u8` points into `slot_ptr` derived from `bucket_ptr`; we ensure
+                            //   `bucket_idx < num_buckets()` at the `get_bucket` call above, so it is in-bounds,
+                            //   properly aligned for `Pair<Key, Value>`, and thus aligned for `pair_size` bytes.
                             // - The copies into `expected_u64`/`desired_u64` read exactly `pair_size` bytes from
                             //   `self.empty_slot_sentinel` and `value`, both valid `Pair<Key, Value>` instances;
                             //   destinations are local temps and non-overlapping with sources.
@@ -875,9 +884,9 @@ where
                             let _ = KeySizeCheck::<Key>::CHECK;
 
                             // Safety:
-                            // - `bucket_ptr` was obtained from `self.storage_ref.get_bucket(bucket_idx)`, which is
-                            //   constructed from `BucketStorageRef::new` and only ever created with a valid, in-bounds,
-                            //   properly aligned device allocation for `Pair<Key, Value>` slots.
+                            // - We ensure `bucket_idx < num_buckets()` at the `get_bucket` call above, so `bucket_ptr`
+                            //   is within the allocation from `BucketStorageRef::new` and is valid, in-bounds, and
+                            //   properly aligned for `Pair<Key, Value>` slots.
                             // - `Pair`’s `#[repr(C)]` + alignment machinery means `(*slot_ptr).first/second` are laid out
                             //   and aligned exactly as `Key`/`Value`, so casting their references to `*mut u8` and using
                             //   `key_size`/`val_size` matches the guarantees required by the atomic helpers.

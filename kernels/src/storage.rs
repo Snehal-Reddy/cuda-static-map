@@ -245,26 +245,14 @@ impl<T, const BUCKET_SIZE: usize> BucketStorageRef<T, BUCKET_SIZE> {
     ///
     /// # Returns
     /// Pointer to the first slot of the bucket
-    #[cfg(target_arch = "nvptx64")]
-    pub fn get_bucket(&self, bucket_idx: usize) -> *const T {
-        // Safety: `self.slots` is a valid pointer to device memory (guaranteed by BucketStorageRef::new).
-        // The calculation `bucket_idx * BUCKET_SIZE` is bounded by `num_buckets()` which ensures
-        // the resulting pointer is within the allocated memory region.
-        unsafe { self.slots.add(bucket_idx * BUCKET_SIZE) }
-    }
-
-    /// Gets a pointer to the bucket at the given bucket index (host-side).
     ///
-    /// # Arguments
-    /// * `bucket_idx` - The bucket index
-    ///
-    /// # Returns
-    /// Pointer to the first slot of the bucket
-    #[cfg(not(target_arch = "nvptx64"))]
-    pub fn get_bucket(&self, bucket_idx: usize) -> *const T {
-        // Safety: `self.slots` is a valid pointer to device memory (guaranteed by BucketStorageRef::new).
-        // The calculation `bucket_idx * BUCKET_SIZE` is bounded by `num_buckets()` which ensures
-        // the resulting pointer is within the allocated memory region.
+    /// # Safety
+    /// The caller must ensure `bucket_idx < num_buckets()` so that the resulting pointer is within
+    /// the allocated region. `self.slots` is a valid pointer to device memory (guaranteed by
+    /// `BucketStorageRef::new`).
+    #[inline]
+    pub unsafe fn get_bucket(&self, bucket_idx: usize) -> *const T {
+        // Safety: caller guarantees bucket_idx < num_buckets() (see Safety section above).
         unsafe { self.slots.add(bucket_idx * BUCKET_SIZE) }
     }
 
@@ -339,7 +327,8 @@ impl<T, const BUCKET_SIZE: usize> BucketStorageRef<T, BUCKET_SIZE> {
 /// let _ctx = cust::quick_init()?;
 /// let extent = Extent::new(1000);
 /// let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
-/// let storage = BucketStorage::<Pair<u32, u32>, 1>::new(extent, &stream)?;
+/// let mut storage = unsafe { BucketStorage::<Pair<u32, u32>, 1>::new(extent, &stream)? };
+/// // Safety: caller must initialize (e.g. storage.initialize(...)) and sync stream before use.
 /// ```
 #[cfg(not(target_arch = "nvptx64"))]
 #[derive(Debug)]
@@ -367,12 +356,18 @@ where
     ///
     /// # Errors
     /// Returns `CudaResult` if device memory allocation fails.
-    pub fn new(extent: Extent, stream: &Stream) -> CudaResult<Self> {
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - Before the returned storage is read (including via `data()`, `storage_ref()`, or any
+    ///   kernel), either `initialize()` is called, or `initialize_async()` is called and then
+    ///   the given stream is synchronized (e.g. `stream.synchronize()` or equivalent) before
+    ///   any such read.
+    /// - `extent.value()` is a valid capacity (no overflow when used as allocation size).
+    pub unsafe fn new(extent: Extent, stream: &Stream) -> CudaResult<Self> {
         let capacity = extent.value();
-        // Safety: The buffer is only used after `initialize()` or `initialize_async()` fills all slots,
-        // ensuring memory is initialized before reads. Stream ordering is maintained: `initialize()`
-        // synchronizes, and callers must synchronize after `initialize_async()` before use.
-        // `capacity` is a valid usize, so overflow is handled by the allocation function.
+        // Safety: Caller guarantees initialization before read and stream sync after
+        // initialize_async, per the function's safety contract; capacity is valid per that contract.
         let buffer = unsafe { DeviceBuffer::uninitialized_async(capacity, stream)? };
         Ok(Self { extent, buffer })
     }
@@ -579,11 +574,8 @@ impl<'a, const SCOPE: ThreadScope> AtomicRef<'a, u32, SCOPE> {
     #[inline(always)]
     pub fn fetch_add(&self, val: u32, order: Ordering) -> u32 {
         unsafe {
-            // Safety: from `cuda_std::atomic::mid` — pointer must be valid device
-            // memory for `u32`, 4-byte aligned, and initialized; ordering must match
-            // intended sync; `ThreadScope::Thread` requires no cross-thread aliasing
-            // (volatile). `AtomicRef::new` is unsafe and expects the caller to supply
-            // such a pointer; we forward ordering/scope unchanged.
+            // Safety: `AtomicRef::new` expects the caller to supply a valid pointer,
+            // that is aligned and initialized. We forward ordering/scope unchanged.
             match SCOPE {
                  ThreadScope::System => mid::atomic_fetch_add_u32_system(self.ptr, order, val),
                  ThreadScope::Device => mid::atomic_fetch_add_u32_device(self.ptr, order, val),
@@ -857,10 +849,23 @@ where
 {
     /// Creates a new counter storage.
     ///
+    /// Allocates device memory for a single counter element but does not initialize it.
+    /// Use `reset()` (or another write) to initialize before the counter is read.
+    ///
     /// # Arguments
     /// * `stream` - CUDA stream for allocation
-    pub fn new(stream: &Stream) -> CudaResult<Self> {
-        // Allocate a single element buffer
+    ///
+    /// # Errors
+    /// Returns `CudaResult` if device memory allocation fails.
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - Before the returned storage is read (including via `data()`, `storage_ref()`, or any
+    ///   kernel), the counter is written (e.g. via `reset()` or a kernel that initializes it),
+    ///   and if that write was asynchronous, the given stream is synchronized before any read.
+    pub unsafe fn new(stream: &Stream) -> CudaResult<Self> {
+        // Safety: Caller guarantees the counter is written before any read, and stream sync
+        // after async write, per the function's safety contract.
         let buffer = unsafe { DeviceBuffer::uninitialized_async(1, stream)? };
         Ok(Self { buffer })
     }
@@ -902,11 +907,16 @@ where
 
     /// Loads the counter value to the host.
     ///
+    /// Enqueues an async copy on the given stream and synchronizes that stream before
+    /// returning, so the caller does not need to synchronize after this call.
+    ///
     /// # Arguments
-    /// * `stream` - CUDA stream for the operation
+    /// * `stream` - CUDA stream for the copy (synchronized before return)
     ///
     /// # Returns
-    /// The counter value on the host
+    /// The counter value on the host. For a meaningful value, the counter must have
+    /// been written (e.g. via `reset()` or a kernel) and those writes must have completed
+    /// on this stream (or been synchronized with it) before calling this method.
     pub fn load_to_host(&self, stream: &Stream) -> CudaResult<T> {
         let mut host_val = vec![T::default()];
         // Safety: buffer has size 1, host_val has size 1. Pointers are valid.
@@ -1481,7 +1491,8 @@ pub mod atomic_ops {
     }
 }
 
-// Host-side placeholder implementations (for testing/development)
+// Host-side placeholder implementations
+// Technically we do not need this, but it is useful for testing/development.
 #[cfg(not(target_arch = "nvptx64"))]
 pub mod atomic_ops {
     use crate::open_addressing::ThreadScope;
