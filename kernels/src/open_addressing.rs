@@ -108,6 +108,10 @@ pub trait KeyEqual<Key: ?Sized> {
 #[derive(Copy, Clone, Default)]
 pub struct DefaultKeyEqual;
 
+// Safety: DefaultKeyEqual is a unit struct with no fields, so it is Copy, has no
+// references or pointers, no Drop, and copying it is a no-op; it is safe to copy to/from device.
+unsafe impl cust_core::DeviceCopy for DefaultKeyEqual {}
+
 impl<Key: ?Sized> KeyEqual<Key> for DefaultKeyEqual {
     fn equal<ProbeKey: ?Sized>(&self, probe_key: &ProbeKey, slot_key: &Key) -> EqualResult
     where

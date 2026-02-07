@@ -432,6 +432,7 @@ dependencies = [
  "cust",
  "cust_core",
  "cust_raw",
+ "paste",
  "primal",
 ]
 
