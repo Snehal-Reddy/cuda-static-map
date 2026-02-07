@@ -427,18 +427,18 @@ macro_rules! bulk_device_kernels {
                 type Ref = StaticMapRef<K, V, S, $n, DefaultKeyEqual, { ThreadScope::Device }>;
 
                 // Ref/CounterStorageRef are repr(C) and passed per NVVM kernel ABI.
-                // SAFETY: Kernel dereferences `pairs`. The host (launcher) must ensure `pairs` points to valid device memory for at least `n` elements, valid for the duration of the kernel.
+                // SAFETY: Kernel dereferences `pairs`. The host (launcher) must ensure `pairs` points to valid device memory for at least `num_pairs` elements, valid for the duration of the kernel.
                 #[kernel]
                 #[allow(improper_ctypes_definitions)]
                 pub unsafe fn [<bulk_insert_n_bs $n>](
                     pairs: *const Pair<K, V>,
-                    n: usize,
+                    num_pairs: usize,
                     counter_ref: CounterStorageRef<u64, { ThreadScope::Device }>,
                     container_ref: Ref,
                 ) {
                     let idx = thread::index_1d() as usize;
-                    if idx < n {
-                        // SAFETY: Host guarantees `pairs` valid for at least `n` elements (see kernel SAFETY). `idx < n` so `pairs.add(idx)` is in bounds.
+                    if idx < num_pairs {
+                        // SAFETY: Host guarantees `pairs` valid for at least `num_pairs` elements (see kernel SAFETY). `idx < num_pairs` so `pairs.add(idx)` is in bounds.
                         let pair = unsafe { *pairs.add(idx) };
                         if container_ref.insert(pair) {
                             // Relaxed ordering: host reads count after stream sync; no cross-thread ordering required.
@@ -448,19 +448,19 @@ macro_rules! bulk_device_kernels {
                 }
 
                 // Ref/CounterStorageRef are repr(C) and passed per NVVM kernel ABI.
-                // SAFETY: Kernel dereferences `keys` and `output`. The host (launcher) must ensure `keys` and `output` point to valid device memory for at least `n` elements, valid for the duration of the kernel.
+                // SAFETY: Kernel dereferences `keys` and `output`. The host (launcher) must ensure `keys` and `output` point to valid device memory for at least `num_pairs` elements, valid for the duration of the kernel.
                 #[kernel]
                 #[allow(improper_ctypes_definitions)]
                 pub unsafe fn [<bulk_find_n_bs $n>](
                     keys: *const K,
-                    n: usize,
+                    num_pairs: usize,
                     output: *mut V,
                     empty_value: V,
                     container_ref: Ref,
                 ) {
                     let idx = thread::index_1d() as usize;
-                    if idx < n {
-                        // SAFETY: Host guarantees `keys` and `output` valid for at least `n` elements (see kernel SAFETY). `idx < n` so `keys.add(idx)` and `output.add(idx)` are in bounds.
+                    if idx < num_pairs {
+                        // SAFETY: Host guarantees `keys` and `output` valid for at least `num_pairs` elements (see kernel SAFETY). `idx < num_pairs` so `keys.add(idx)` and `output.add(idx)` are in bounds.
                         let key = unsafe { *keys.add(idx) };
                         let val = container_ref.find(&key);
                         unsafe { *output.add(idx) = val.unwrap_or(empty_value) };
@@ -468,18 +468,18 @@ macro_rules! bulk_device_kernels {
                 }
 
                 // Ref/CounterStorageRef are repr(C) and passed per NVVM kernel ABI.
-                // SAFETY: Kernel dereferences `keys` and `output`. The host (launcher) must ensure `keys` and `output` point to valid device memory for at least `n` elements, valid for the duration of the kernel.
+                // SAFETY: Kernel dereferences `keys` and `output`. The host (launcher) must ensure `keys` and `output` point to valid device memory for at least `num_pairs` elements, valid for the duration of the kernel.
                 #[kernel]
                 #[allow(improper_ctypes_definitions)]
                 pub unsafe fn [<bulk_contains_n_bs $n>](
                     keys: *const K,
-                    n: usize,
+                    num_pairs: usize,
                     output: *mut bool,
                     container_ref: Ref,
                 ) {
                     let idx = thread::index_1d() as usize;
-                    if idx < n {
-                        // SAFETY: Host guarantees `keys` and `output` valid for at least `n` elements (see kernel SAFETY). `idx < n` so `keys.add(idx)` and `output.add(idx)` are in bounds.
+                    if idx < num_pairs {
+                        // SAFETY: Host guarantees `keys` and `output` valid for at least `num_pairs` elements (see kernel SAFETY). `idx < num_pairs` so `keys.add(idx)` and `output.add(idx)` are in bounds.
                         let key = unsafe { *keys.add(idx) };
                         unsafe { *output.add(idx) = container_ref.contains(&key) };
                     }

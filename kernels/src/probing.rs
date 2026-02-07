@@ -131,14 +131,15 @@ pub trait ProbingScheme<Key>: Copy + DeviceCopy {
 /// # Type Parameters
 /// * `Key` - The key type that this probing scheme operates on
 /// * `Hasher` - Hash function type
+/// * `CG_SIZE` - Cooperative group size (default 1)
 #[repr(C)]
 #[derive(Debug)]
-pub struct LinearProbing<Key, Hasher> {
+pub struct LinearProbing<Key, Hasher, const CG_SIZE: usize = 1> {
     hasher: Hasher,
     _phantom: PhantomData<Key>,
 }
 
-impl<Key, Hasher> Clone for LinearProbing<Key, Hasher>
+impl<Key, Hasher, const CG_SIZE: usize> Clone for LinearProbing<Key, Hasher, CG_SIZE>
 where
     Hasher: Clone,
 {
@@ -150,9 +151,12 @@ where
     }
 }
 
-impl<Key, Hasher> Copy for LinearProbing<Key, Hasher> where Hasher: Copy {}
+impl<Key, Hasher, const CG_SIZE: usize> Copy for LinearProbing<Key, Hasher, CG_SIZE> where
+    Hasher: Copy
+{
+}
 
-impl<Key, Hasher> LinearProbing<Key, Hasher>
+impl<Key, Hasher, const CG_SIZE: usize> LinearProbing<Key, Hasher, CG_SIZE>
 where
     Hasher: Hash<Key> + Copy + DeviceCopy,
 {
@@ -165,7 +169,7 @@ where
     }
 }
 
-impl<Key, Hasher> ProbingScheme<Key> for LinearProbing<Key, Hasher>
+impl<Key, Hasher, const CG_SIZE: usize> ProbingScheme<Key> for LinearProbing<Key, Hasher, CG_SIZE>
 where
     Hasher: Hash<Key> + Copy + DeviceCopy,
 {
@@ -215,7 +219,7 @@ where
     }
 
     fn cg_size(&self) -> usize {
-        1 // Scalar operations for MVP
+        CG_SIZE
     }
 
     fn is_double_hashing(&self) -> bool {
@@ -228,7 +232,10 @@ where
 // - `_phantom: PhantomData<Key>` which is a zero-sized type
 // Both fields are trivially copyable and contain no references to CPU memory.
 // The Key type parameter is only used in PhantomData, which doesn't affect memory layout.
-unsafe impl<Key, Hasher> DeviceCopy for LinearProbing<Key, Hasher> where Hasher: Copy + DeviceCopy {}
+unsafe impl<Key, Hasher, const CG_SIZE: usize> DeviceCopy for LinearProbing<Key, Hasher, CG_SIZE> where
+    Hasher: Copy + DeviceCopy
+{
+}
 
 /// Double hashing probing scheme.
 ///
@@ -243,15 +250,17 @@ unsafe impl<Key, Hasher> DeviceCopy for LinearProbing<Key, Hasher> where Hasher:
 /// * `Key` - The key type that this probing scheme operates on
 /// * `Hasher1` - First hash function type that implements `Hash<Key>`
 /// * `Hasher2` - Second hash function type that implements `Hash<Key>`
+/// * `CG_SIZE` - Cooperative group size (default 1)
 #[repr(C)]
 #[derive(Debug)]
-pub struct DoubleHashProbing<Key, Hasher1, Hasher2> {
+pub struct DoubleHashProbing<Key, Hasher1, Hasher2, const CG_SIZE: usize = 1> {
     hasher1: Hasher1,
     hasher2: Hasher2,
     _phantom: PhantomData<Key>,
 }
 
-impl<Key, Hasher1, Hasher2> Clone for DoubleHashProbing<Key, Hasher1, Hasher2>
+impl<Key, Hasher1, Hasher2, const CG_SIZE: usize> Clone
+    for DoubleHashProbing<Key, Hasher1, Hasher2, CG_SIZE>
 where
     Hasher1: Hash<Key> + Clone,
     Hasher2: Hash<Key> + Clone,
@@ -265,14 +274,15 @@ where
     }
 }
 
-impl<Key, Hasher1, Hasher2> Copy for DoubleHashProbing<Key, Hasher1, Hasher2>
+impl<Key, Hasher1, Hasher2, const CG_SIZE: usize> Copy
+    for DoubleHashProbing<Key, Hasher1, Hasher2, CG_SIZE>
 where
     Hasher1: Hash<Key> + Copy,
     Hasher2: Hash<Key> + Copy,
 {
 }
 
-impl<Key, Hasher1, Hasher2> DoubleHashProbing<Key, Hasher1, Hasher2>
+impl<Key, Hasher1, Hasher2, const CG_SIZE: usize> DoubleHashProbing<Key, Hasher1, Hasher2, CG_SIZE>
 where
     Hasher1: Hash<Key> + Copy + DeviceCopy,
     Hasher2: Hash<Key> + Copy + DeviceCopy,
@@ -287,7 +297,8 @@ where
     }
 }
 
-impl<Key, Hasher1, Hasher2> ProbingScheme<Key> for DoubleHashProbing<Key, Hasher1, Hasher2>
+impl<Key, Hasher1, Hasher2, const CG_SIZE: usize> ProbingScheme<Key>
+    for DoubleHashProbing<Key, Hasher1, Hasher2, CG_SIZE>
 where
     Hasher1: Hash<Key> + Copy + DeviceCopy,
     Hasher2: Hash<Key> + Copy + DeviceCopy,
@@ -342,7 +353,7 @@ where
     }
 
     fn cg_size(&self) -> usize {
-        1 // Scalar operations for MVP
+        CG_SIZE
     }
 
     fn is_double_hashing(&self) -> bool {
@@ -356,7 +367,8 @@ where
 // - `_phantom: PhantomData<Key>` which is a zero-sized type
 // All fields are trivially copyable and contain no references to CPU memory.
 // The Key type parameter is only used in PhantomData, which doesn't affect memory layout.
-unsafe impl<Key, Hasher1, Hasher2> DeviceCopy for DoubleHashProbing<Key, Hasher1, Hasher2>
+unsafe impl<Key, Hasher1, Hasher2, const CG_SIZE: usize> DeviceCopy
+    for DoubleHashProbing<Key, Hasher1, Hasher2, CG_SIZE>
 where
     Hasher1: Hash<Key> + Copy + DeviceCopy,
     Hasher2: Hash<Key> + Copy + DeviceCopy,
