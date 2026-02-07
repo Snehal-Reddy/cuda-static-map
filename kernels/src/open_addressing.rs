@@ -12,6 +12,9 @@ use crate::probing::ProbingScheme;
 use crate::storage::BucketStorageRef;
 use cust_core::DeviceCopy;
 
+#[cfg(target_arch = "nvptx64")]
+use cuda_std::warp;
+
 /// Thread scope for atomic operations.
 ///
 /// This enum is used as a const generic parameter to control the scope of
@@ -995,5 +998,352 @@ where
                 return false; // Map is full (should not happen with proper sizing)
             }
         }
+    }
+
+    /// Cooperative group insert (warp tile based).
+    ///
+    /// # Safety
+    /// `tile_mask` must be a valid partition of the warp (i.e., the set of threads indicated by
+    /// `tile_mask` must be converged and executing this function in sync).
+    #[inline]
+    pub unsafe fn insert_cooperative(&self, tile_mask: u32, value: Pair<Key, Value>) -> bool {
+        use crate::storage::atomic_ops;
+
+        let key = value.first;
+        let capacity = self.storage_ref.capacity();
+
+        let mut iter = self
+            .probing_scheme
+            .make_iterator(&key, BUCKET_SIZE, capacity);
+        let init_idx = iter.current();
+
+        let pair_size = core::mem::size_of::<Pair<Key, Value>>();
+        let key_size = core::mem::size_of::<Key>();
+        let val_size = core::mem::size_of::<Value>();
+        let my_lane = warp::lane_id();
+
+        loop {
+            let bucket_idx = iter.current() / BUCKET_SIZE;
+            // SAFETY: the probing iterator yields slot indices in `[0, capacity)`, so
+            // `bucket_idx = iter.current() / BUCKET_SIZE` is strictly less than
+            // `capacity / BUCKET_SIZE == num_buckets()`.
+            let bucket_ptr = unsafe { self.storage_ref.get_bucket(bucket_idx) };
+
+            let mut thread_status = EqualResult::Unequal;
+
+            for i in 0..BUCKET_SIZE {
+                // SAFETY:
+                // - `bucket_ptr` is a properly aligned bucket base within the allocated backing array.
+                // - `i` is bounded by `0..BUCKET_SIZE`, so `bucket_ptr.add(i)` stays within that bucket.
+                let slot_ptr = unsafe { bucket_ptr.add(i) };
+                // SAFETY: `slot_ptr` is valid and points to initialized memory.
+                let slot_val = unsafe { *slot_ptr };
+                let slot_key = slot_val.first;
+
+                let res = self
+                    .predicate
+                    .equal_for_insert(&key, &slot_key, ALLOWS_DUPLICATES);
+                if res == EqualResult::Equal {
+                    thread_status = EqualResult::Equal;
+                    break;
+                }
+                if res == EqualResult::Available && thread_status != EqualResult::Available {
+                    thread_status = EqualResult::Available;
+                }
+            }
+
+            // SAFETY: `tile_mask` is guaranteed by the caller to be a valid partition of the warp.
+            unsafe { warp::sync_warp(tile_mask) };
+
+            // SAFETY: `tile_mask` is guaranteed by the caller to be a valid partition of the warp.
+            if unsafe { warp::warp_vote_any(tile_mask, thread_status == EqualResult::Equal) } {
+                return true;
+            }
+
+            // SAFETY: `tile_mask` is guaranteed by the caller to be a valid partition of the warp.
+            let ballot = unsafe {
+                warp::warp_vote_ballot(tile_mask, thread_status == EqualResult::Available)
+            };
+            if ballot != 0 {
+                let src_lane = (ballot & tile_mask).trailing_zeros();
+
+                let mut success = false;
+                let mut duplicate = false;
+
+                if my_lane == src_lane {
+                    for i in 0..BUCKET_SIZE {
+                        // SAFETY:
+                        // - `bucket_ptr` is valid (see above).
+                        // - `i` is in bounds.
+                        // - We cast to `*mut` for atomic operations, which is safe as we coordinate access.
+                        let slot_ptr = unsafe { bucket_ptr.add(i) as *mut Pair<Key, Value> };
+                        let slot_u8 = slot_ptr as *mut u8;
+                        // SAFETY: Dereferencing `slot_ptr` is safe (valid pointer).
+                        let slot_val = unsafe { *slot_ptr };
+                        let slot_key = slot_val.first;
+
+                        if self
+                            .predicate
+                            .equal_for_insert(&key, &slot_key, ALLOWS_DUPLICATES)
+                            == EqualResult::Available
+                        {
+                            let cas_success = if pair_size <= 8 {
+                                let mut expected_u64 = 0u64;
+                                // SAFETY: `expected_u64` is a local stack variable. `empty_slot_sentinel` is a valid reference.
+                                // `pair_size` is correct. Pointers are non-overlapping.
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        &self.empty_slot_sentinel as *const Pair<Key, Value>
+                                            as *const u8,
+                                        &mut expected_u64 as *mut u64 as *mut u8,
+                                        pair_size,
+                                    );
+                                }
+                                let mut desired_u64 = 0u64;
+                                // SAFETY: `desired_u64` is a local stack variable. `value` is a valid reference.
+                                // `pair_size` is correct. Pointers are non-overlapping.
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        &value as *const Pair<Key, Value> as *const u8,
+                                        &mut desired_u64 as *mut u64 as *mut u8,
+                                        pair_size,
+                                    );
+                                }
+                                // SAFETY:
+                                // - `slot_u8` is a valid, aligned pointer.
+                                // - `pair_size` is <= 8 bytes.
+                                // - `expected_u64` and `desired_u64` are prepared correctly.
+                                unsafe {
+                                    atomic_ops::packed_cas::<SCOPE>(
+                                        slot_u8,
+                                        expected_u64,
+                                        desired_u64,
+                                        pair_size,
+                                    )
+                                }
+                            } else {
+                                let _ = KeySizeCheck::<Key>::CHECK;
+                                let get_u64 = |ptr: *const u8, size: usize| -> u64 {
+                                    let mut temp = 0u64;
+                                    // SAFETY: `ptr` is valid, `temp` is local. `size` fits in `u64`.
+                                    unsafe {
+                                        core::ptr::copy_nonoverlapping(
+                                            ptr,
+                                            &mut temp as *mut u64 as *mut u8,
+                                            size,
+                                        )
+                                    };
+                                    temp
+                                };
+                                let expected_key_u64 = get_u64(
+                                    &self.empty_slot_sentinel.first as *const Key as *const u8,
+                                    key_size,
+                                );
+                                let desired_key_u64 =
+                                    get_u64(&value.first as *const Key as *const u8, key_size);
+
+                                if val_size <= 8 {
+                                    let expected_val_u64 = get_u64(
+                                        &self.empty_slot_sentinel.second as *const Value
+                                            as *const u8,
+                                        val_size,
+                                    );
+                                    let desired_val_u64 = get_u64(
+                                        &value.second as *const Value as *const u8,
+                                        val_size,
+                                    );
+                                    // SAFETY:
+                                    // - `slot_ptr` is valid and aligned.
+                                    // - `key_size` and `val_size` match `Key` and `Value`.
+                                    // - Atomic ops handle concurrency.
+                                    unsafe {
+                                        atomic_ops::back_to_back_cas::<SCOPE>(
+                                            &mut (*slot_ptr).first as *mut Key as *mut u8,
+                                            &mut (*slot_ptr).second as *mut Value as *mut u8,
+                                            expected_key_u64,
+                                            desired_key_u64,
+                                            expected_val_u64,
+                                            desired_val_u64,
+                                            key_size,
+                                            val_size,
+                                        )
+                                    }
+                                } else {
+                                    let desired_val_u64 = get_u64(
+                                        &value.second as *const Value as *const u8,
+                                        8.min(val_size),
+                                    );
+                                    // SAFETY: Same as back_to_back_cas.
+                                    unsafe {
+                                        atomic_ops::cas_dependent_write::<SCOPE>(
+                                            &mut (*slot_ptr).first as *mut Key as *mut u8,
+                                            &mut (*slot_ptr).second as *mut Value as *mut u8,
+                                            expected_key_u64,
+                                            desired_key_u64,
+                                            desired_val_u64,
+                                            key_size,
+                                            val_size,
+                                        )
+                                    }
+                                }
+                            };
+
+                            if cas_success {
+                                success = true;
+                            } else {
+                                // SAFETY: `slot_ptr` is valid.
+                                let current_val = unsafe { *slot_ptr };
+                                if current_val.first == key {
+                                    duplicate = true;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // SAFETY: `tile_mask` is valid. `src_lane` is a valid lane ID (0-31).
+                let (s, _) =
+                    unsafe { warp::warp_shuffle_idx(tile_mask, success as u32, src_lane, 32) };
+                // SAFETY: `tile_mask` is valid. `src_lane` is a valid lane ID (0-31).
+                let (d, _) =
+                    unsafe { warp::warp_shuffle_idx(tile_mask, duplicate as u32, src_lane, 32) };
+
+                if s != 0 || d != 0 {
+                    return true;
+                }
+            } else {
+                iter.next();
+                if iter.current() == init_idx {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Cooperative group find (warp tile based).
+    ///
+    /// # Safety
+    /// `tile_mask` must be a valid partition of the warp (i.e., the set of threads indicated by
+    /// `tile_mask` must be converged and executing this function in sync).
+    #[inline]
+    pub unsafe fn find_cooperative(&self, tile_mask: u32, key: &Key) -> Option<Value> {
+        use crate::storage::atomic_ops;
+
+        let capacity = self.storage_ref.capacity();
+        let mut iter = self
+            .probing_scheme
+            .make_iterator(key, BUCKET_SIZE, capacity);
+        let init_idx = iter.current();
+        let my_lane = warp::lane_id();
+
+        loop {
+            let bucket_idx = iter.current() / BUCKET_SIZE;
+            // SAFETY: `bucket_idx` is strictly less than `num_buckets()` because `iter.current()` is < `capacity`.
+            let bucket_ptr = unsafe { self.storage_ref.get_bucket(bucket_idx) };
+
+            let mut thread_status = EqualResult::Unequal;
+
+            for i in 0..BUCKET_SIZE {
+                // SAFETY: `bucket_ptr` is valid, `i` is in bounds.
+                let slot_ptr = unsafe { bucket_ptr.add(i) };
+                // SAFETY: `slot_ptr` is valid.
+                let slot_val = unsafe { *slot_ptr };
+                let slot_key = slot_val.first;
+                match self.predicate.equal_for_find(key, &slot_key) {
+                    EqualResult::Equal => {
+                        thread_status = EqualResult::Equal;
+                        break;
+                    }
+                    EqualResult::Empty => {
+                        thread_status = EqualResult::Empty;
+                    }
+                    _ => {}
+                }
+            }
+
+            // SAFETY: Caller guarantees `tile_mask` is valid.
+            unsafe { warp::sync_warp(tile_mask) };
+
+            // SAFETY: Caller guarantees `tile_mask` is valid.
+            let found_ballot =
+                unsafe { warp::warp_vote_ballot(tile_mask, thread_status == EqualResult::Equal) };
+
+            if found_ballot != 0 {
+                let src_lane = (found_ballot & tile_mask).trailing_zeros();
+
+                let my_slot_ptr_u64 = if my_lane == src_lane {
+                    let mut found_ptr = 0u64;
+                    for i in 0..BUCKET_SIZE {
+                        // SAFETY: `bucket_ptr` is valid, `i` is in bounds.
+                        let ptr = unsafe { bucket_ptr.add(i) };
+                        // SAFETY: `ptr` is valid.
+                        if self.predicate.equal_for_find(key, &unsafe { *ptr }.first)
+                            == EqualResult::Equal
+                        {
+                            found_ptr = ptr as u64;
+                            break;
+                        }
+                    }
+                    found_ptr
+                } else {
+                    0
+                };
+
+                // SAFETY: Caller guarantees `tile_mask` is valid. `src_lane` is valid.
+                let (ptr_u64, _) =
+                    unsafe { warp::warp_shuffle_idx(tile_mask, my_slot_ptr_u64, src_lane, 32) };
+                let slot_ptr = ptr_u64 as *const Pair<Key, Value>;
+
+                let pair_size = core::mem::size_of::<Pair<Key, Value>>();
+                if pair_size > 8 {
+                    // SAFETY: `slot_ptr` comes from a valid bucket address (shuffled from `src_lane`), so it is valid and aligned.
+                    // We can cast it to `*mut` because we are only reading the `second` field via `val_ptr` or `final_val`,
+                    // and `wait_for_payload` uses `val_ptr` for atomic loads.
+                    let val_ptr = unsafe {
+                        &mut (*(slot_ptr as *mut Pair<Key, Value>)).second as *mut Value as *mut u8
+                    };
+                    let val_size = core::mem::size_of::<Value>();
+                    // SAFETY: `empty_slot_sentinel` is valid, `temp` is local, `copy_nonoverlapping` is safe.
+                    let empty_val_u64 = unsafe {
+                        let mut temp = 0u64;
+                        core::ptr::copy_nonoverlapping(
+                            &self.empty_slot_sentinel.second as *const Value as *const u8,
+                            &mut temp as *mut u64 as *mut u8,
+                            val_size.min(8),
+                        );
+                        temp
+                    };
+                    // SAFETY: `val_ptr` is valid. `empty_val_u64` is valid.
+                    unsafe {
+                        atomic_ops::wait_for_payload::<SCOPE>(val_ptr, empty_val_u64, val_size);
+                    }
+                }
+
+                // SAFETY: `slot_ptr` is valid.
+                return Some(unsafe { (*slot_ptr).second });
+            }
+
+            // SAFETY: Caller guarantees `tile_mask` is valid.
+            if unsafe { warp::warp_vote_any(tile_mask, thread_status == EqualResult::Empty) } {
+                return None;
+            }
+
+            iter.next();
+            if iter.current() == init_idx {
+                return None;
+            }
+        }
+    }
+
+    /// Cooperative group contains (warp tile based).
+    ///
+    /// # Safety
+    /// `tile_mask` must be a valid partition of the warp (i.e., the set of threads indicated by
+    /// `tile_mask` must be converged and executing this function in sync).
+    #[inline]
+    pub unsafe fn contains_cooperative(&self, tile_mask: u32, key: &Key) -> bool {
+        // SAFETY: Respsonsibility met by the caller.
+        unsafe { self.find_cooperative(tile_mask, key).is_some() }
     }
 }

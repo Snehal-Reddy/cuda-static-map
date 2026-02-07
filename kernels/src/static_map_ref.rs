@@ -211,4 +211,55 @@ where
     pub fn contains(&self, key: &Key) -> bool {
         self.find(key).is_some()
     }
+
+    /// Inserts a key-value pair into the map using a cooperative group.
+    ///
+    /// # Arguments
+    /// * `tile_mask` - Bitmask of threads in the cooperative group (tile)
+    /// * `cg_size` - Size of the cooperative group
+    /// * `value` - The key-value pair to insert
+    ///
+    /// # Safety
+    /// `tile_mask` must be a valid partition of the warp (i.e., the set of threads indicated by
+    /// `tile_mask` must be converged and executing this function in sync).
+    #[inline]
+    pub unsafe fn insert_cooperative(&self, tile_mask: u32, value: Pair<Key, Value>) -> bool {
+        // Safety: The caller guarantees that `tile_mask` represents a valid, converged cooperative
+        // group, which satisfies the safety requirements of the inner `insert_cooperative`.
+        unsafe { self.as_ref_impl().insert_cooperative(tile_mask, value) }
+    }
+
+    /// Finds a value in the map using a cooperative group.
+    ///
+    /// # Arguments
+    /// * `tile_mask` - Bitmask of threads in the cooperative group (tile)
+    /// * `cg_size` - Size of the cooperative group
+    /// * `key` - The key to search for
+    ///
+    /// # Safety
+    /// `tile_mask` must be a valid partition of the warp (i.e., the set of threads indicated by
+    /// `tile_mask` must be converged and executing this function in sync).
+    #[inline]
+    pub unsafe fn find_cooperative(&self, tile_mask: u32, key: &Key) -> Option<Value> {
+        // Safety: The caller guarantees that `tile_mask` represents a valid, converged cooperative
+        // group, which satisfies the safety requirements of the inner `find_cooperative`.
+        unsafe { self.as_ref_impl().find_cooperative(tile_mask, key) }
+    }
+
+    /// Checks if a key exists in the map using a cooperative group.
+    ///
+    /// # Arguments
+    /// * `tile_mask` - Bitmask of threads in the cooperative group (tile)
+    /// * `cg_size` - Size of the cooperative group
+    /// * `key` - The key to search for
+    ///
+    /// # Safety
+    /// `tile_mask` must be a valid partition of the warp (i.e., the set of threads indicated by
+    /// `tile_mask` must be converged and executing this function in sync).
+    #[inline]
+    pub unsafe fn contains_cooperative(&self, tile_mask: u32, key: &Key) -> bool {
+        // Safety: The caller guarantees that `tile_mask` represents a valid, converged cooperative
+        // group, which satisfies the safety requirements of the inner `contains_cooperative`.
+        unsafe { self.as_ref_impl().contains_cooperative(tile_mask, key) }
+    }
 }
