@@ -310,6 +310,14 @@ where
     }
 }
 
+// Safety: EqualWrapper contains only KeyEqual (Copy), Key (Copy). All are trivially copyable.
+unsafe impl<Key, KeyEqual> DeviceCopy for EqualWrapper<Key, KeyEqual>
+where
+    Key: DeviceCopy + Copy,
+    KeyEqual: DeviceCopy + Copy,
+{
+}
+
 /// Open addressing implementation layer (Host-side).
 ///
 /// This struct acts as a host-side abstraction layer that encapsulates:

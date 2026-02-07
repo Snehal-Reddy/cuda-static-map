@@ -56,48 +56,6 @@ where
     _phantom: core::marker::PhantomData<(Key, Value, Scheme, KeyEqual)>,
 }
 
-// GPU-specific implementations (only compiled when targeting nvptx64)
-#[cfg(target_arch = "nvptx64")]
-impl<
-    Key,
-    Value,
-    Scheme,
-    const BUCKET_SIZE: usize,
-    KeyEqual,
-    const SCOPE: crate::open_addressing::ThreadScope,
-> StaticMap<Key, Value, Scheme, BUCKET_SIZE, KeyEqual, SCOPE>
-where
-    Key: DeviceCopy + Copy + PartialEq,
-    Value: DeviceCopy + Copy,
-    Scheme: crate::probing::ProbingScheme<Key>,
-    KeyEqual: crate::open_addressing::KeyEqual<Key> + Copy,
-    Pair<Key, Value>: DeviceCopy,
-    (): AlignedTo<{ alignment::<Key, Value>() }>,
-{
-    /// Device-side method to get a reference to the map storage
-    ///
-    /// This is used by kernels to access the map on the GPU.
-    /// In the full implementation, this would return a StaticMapRef.
-    pub fn device_ref(&self) -> crate::static_map_ref::StaticMapRef<Key, Value> {
-        todo!("Implement device-side ref creation")
-    }
-
-    /// Device-side insert operation
-    pub fn device_insert(&self, _key: Key, _value: Value) -> bool {
-        todo!("Implement device-side insert")
-    }
-
-    /// Device-side find operation
-    pub fn device_find(&self, _key: Key) -> Option<Value> {
-        todo!("Implement device-side find")
-    }
-
-    /// Device-side contains operation
-    pub fn device_contains(&self, _key: Key) -> bool {
-        todo!("Implement device-side contains")
-    }
-}
-
 // CPU-specific implementations
 #[cfg(not(target_arch = "nvptx64"))]
 impl<
@@ -282,9 +240,29 @@ where
 
     /// Gets a device-side reference for use in custom kernels.
     ///
-    /// TODO: create StaticMapRef from impl_ and sentinels.
-    pub fn device_ref(&self) -> crate::static_map_ref::StaticMapRef<Key, Value> {
-        todo!("Implement host-side ref creation for device kernels")
+    /// The returned ref can be passed by value to GPU kernels, which may then call
+    /// `.find()`, `.insert()`, and `.contains()` on it.
+    pub fn device_ref(&self) -> crate::static_map_ref::StaticMapRef<
+        Key,
+        Value,
+        Scheme,
+        BUCKET_SIZE,
+        KeyEqual,
+        SCOPE,
+    > {
+        use crate::open_addressing::EqualWrapper;
+        let empty_key = self.impl_.empty_key_sentinel();
+        let empty_value = self.empty_value_sentinel();
+        let erased_key = self.impl_.erased_key_sentinel();
+        let predicate = EqualWrapper::new(empty_key, erased_key, self.impl_.key_eq());
+        let empty_slot_sentinel = Pair::new(empty_key, empty_value);
+        crate::static_map_ref::StaticMapRef::new(
+            empty_slot_sentinel,
+            erased_key,
+            predicate,
+            *self.impl_.probing_scheme(),
+            self.impl_.storage_ref(),
+        )
     }
 }
 
