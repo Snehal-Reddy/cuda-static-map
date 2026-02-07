@@ -413,11 +413,12 @@ macro_rules! bulk_device_kernels {
             mod [<bulk_kernels_bs $n>] {
                 use core::sync::atomic::Ordering;
                 use cuda_std::prelude::*;
+                use cuda_std::warp;
 
                 use crate::hash::IdentityHash;
                 use crate::open_addressing::{DefaultKeyEqual, ThreadScope};
                 use crate::pair::Pair;
-                use crate::probing::LinearProbing;
+                use crate::probing::{LinearProbing, ProbingScheme};
                 use crate::storage::CounterStorageRef;
                 use crate::static_map_ref::StaticMapRef;
 
@@ -427,7 +428,14 @@ macro_rules! bulk_device_kernels {
                 type Ref = StaticMapRef<K, V, S, $n, DefaultKeyEqual, { ThreadScope::Device }>;
 
                 // Ref/CounterStorageRef are repr(C) and passed per NVVM kernel ABI.
-                // SAFETY: Kernel dereferences `pairs`. The host (launcher) must ensure `pairs` points to valid device memory for at least `num_pairs` elements, valid for the duration of the kernel.
+
+                /// Bulk insert kernel.
+                ///
+                /// # Safety
+                ///
+                /// * `pairs` must be a valid device pointer to at least `num_pairs` elements.
+                /// * `pairs` must be valid for reads for the duration of the kernel.
+                /// * `counter_ref` and `container_ref` must be valid references (guaranteed by `impl_bulk_ops_for_canonical_type` setup).
                 #[kernel]
                 #[allow(improper_ctypes_definitions)]
                 pub unsafe fn [<bulk_insert_n_bs $n>](
@@ -436,19 +444,54 @@ macro_rules! bulk_device_kernels {
                     counter_ref: CounterStorageRef<u64, { ThreadScope::Device }>,
                     container_ref: Ref,
                 ) {
-                    let idx = thread::index_1d() as usize;
-                    if idx < num_pairs {
-                        // SAFETY: Host guarantees `pairs` valid for at least `num_pairs` elements (see kernel SAFETY). `idx < num_pairs` so `pairs.add(idx)` is in bounds.
+                    let cg_size = container_ref.probing_scheme().cg_size();
+                    let grid_stride = (thread::grid_dim_x() * thread::block_dim_x()) as usize;
+                    let loop_stride = grid_stride / cg_size;
+                    let mut idx = (thread::index_1d() as usize) / cg_size;
+
+                    while idx < num_pairs {
+                        // SAFETY:
+                        // 1. We checked `idx < num_pairs` in the while loop condition.
+                        // 2. The caller guarantees `pairs` is valid for `num_pairs` elements.
+                        // 3. Therefore, `pairs.add(idx)` is within bounds and valid for read.
                         let pair = unsafe { *pairs.add(idx) };
-                        if container_ref.insert(pair) {
-                            // Relaxed ordering: host reads count after stream sync; no cross-thread ordering required.
-                            counter_ref.data().fetch_add(1, Ordering::Relaxed);
+
+                        if cg_size == 1 {
+                            if container_ref.insert(pair) {
+                                // Relaxed ordering: host reads count after stream sync; no cross-thread ordering required.
+                                counter_ref.data().fetch_add(1, Ordering::Relaxed);
+                            }
+                        } else {
+                            let lane_id = warp::lane_id();
+                            let base_lane = (lane_id / cg_size as u32) * cg_size as u32;
+                            let tile_mask = ((1u32 << cg_size) - 1) << base_lane;
+
+                            // SAFETY:
+                            // 1. `tile_mask` is constructed to partition the warp into `cg_size` groups.
+                            // 2. We are in a converged control flow (all threads in the warp execute this path if `cg_size > 1`).
+                            // 3. All threads in the mask are active.
+                            if unsafe { container_ref.insert_cooperative(tile_mask, pair) } {
+                                // Only the first thread in the group updates the counter
+                                if (lane_id % cg_size as u32) == 0 {
+                                    counter_ref.data().fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         }
+
+                        idx += loop_stride;
                     }
                 }
 
                 // Ref/CounterStorageRef are repr(C) and passed per NVVM kernel ABI.
-                // SAFETY: Kernel dereferences `keys` and `output`. The host (launcher) must ensure `keys` and `output` point to valid device memory for at least `num_pairs` elements, valid for the duration of the kernel.
+
+                /// Bulk find kernel.
+                ///
+                /// # Safety
+                ///
+                /// * `keys` must be a valid device pointer to at least `num_pairs` elements.
+                /// * `output` must be a valid device pointer to at least `num_pairs` elements.
+                /// * Both pointers must be valid for the duration of the kernel.
+                /// * `container_ref` must be a valid reference.
                 #[kernel]
                 #[allow(improper_ctypes_definitions)]
                 pub unsafe fn [<bulk_find_n_bs $n>](
@@ -458,17 +501,53 @@ macro_rules! bulk_device_kernels {
                     empty_value: V,
                     container_ref: Ref,
                 ) {
-                    let idx = thread::index_1d() as usize;
-                    if idx < num_pairs {
-                        // SAFETY: Host guarantees `keys` and `output` valid for at least `num_pairs` elements (see kernel SAFETY). `idx < num_pairs` so `keys.add(idx)` and `output.add(idx)` are in bounds.
+                    let cg_size = container_ref.probing_scheme().cg_size();
+                    let grid_stride = (thread::grid_dim_x() * thread::block_dim_x()) as usize;
+                    let loop_stride = grid_stride / cg_size;
+                    let mut idx = (thread::index_1d() as usize) / cg_size;
+
+                    while idx < num_pairs {
+                        // SAFETY:
+                        // 1. We checked `idx < num_pairs`.
+                        // 2. The caller guarantees `keys` is valid for `num_pairs` elements.
                         let key = unsafe { *keys.add(idx) };
-                        let val = container_ref.find(&key);
-                        unsafe { *output.add(idx) = val.unwrap_or(empty_value) };
+                        let val;
+
+                        if cg_size == 1 {
+                            val = container_ref.find(&key);
+                        } else {
+                            let lane_id = warp::lane_id();
+                            let base_lane = (lane_id / cg_size as u32) * cg_size as u32;
+                            let tile_mask = ((1u32 << cg_size) - 1) << base_lane;
+
+                            // SAFETY:
+                            // 1. `tile_mask` partitions the warp correctly for `cg_size`.
+                            // 2. All threads in the mask are active and converged.
+                            val = unsafe { container_ref.find_cooperative(tile_mask, &key) };
+                        }
+
+                        if cg_size == 1 || (warp::lane_id() % cg_size as u32) == 0 {
+                            // SAFETY:
+                            // 1. We checked `idx < num_pairs`.
+                            // 2. The caller guarantees `output` is valid for `num_pairs` elements.
+                            // 3. We are writing to a unique index `idx` assigned to this thread (or group).
+                            unsafe { *output.add(idx) = val.unwrap_or(empty_value) };
+                        }
+
+                        idx += loop_stride;
                     }
                 }
 
                 // Ref/CounterStorageRef are repr(C) and passed per NVVM kernel ABI.
-                // SAFETY: Kernel dereferences `keys` and `output`. The host (launcher) must ensure `keys` and `output` point to valid device memory for at least `num_pairs` elements, valid for the duration of the kernel.
+
+                /// Bulk contains kernel.
+                ///
+                /// # Safety
+                ///
+                /// * `keys` must be a valid device pointer to at least `num_pairs` elements.
+                /// * `output` must be a valid device pointer to at least `num_pairs` elements.
+                /// * Both pointers must be valid for the duration of the kernel.
+                /// * `container_ref` must be a valid reference.
                 #[kernel]
                 #[allow(improper_ctypes_definitions)]
                 pub unsafe fn [<bulk_contains_n_bs $n>](
@@ -477,11 +556,40 @@ macro_rules! bulk_device_kernels {
                     output: *mut bool,
                     container_ref: Ref,
                 ) {
-                    let idx = thread::index_1d() as usize;
-                    if idx < num_pairs {
-                        // SAFETY: Host guarantees `keys` and `output` valid for at least `num_pairs` elements (see kernel SAFETY). `idx < num_pairs` so `keys.add(idx)` and `output.add(idx)` are in bounds.
+                    let cg_size = container_ref.probing_scheme().cg_size();
+                    let grid_stride = (thread::grid_dim_x() * thread::block_dim_x()) as usize;
+                    let loop_stride = grid_stride / cg_size;
+                    let mut idx = (thread::index_1d() as usize) / cg_size;
+
+                    while idx < num_pairs {
+                        // SAFETY:
+                        // 1. We checked `idx < num_pairs`.
+                        // 2. The caller guarantees `keys` is valid for `num_pairs` elements.
                         let key = unsafe { *keys.add(idx) };
-                        unsafe { *output.add(idx) = container_ref.contains(&key) };
+                        let res;
+
+                        if cg_size == 1 {
+                            res = container_ref.contains(&key);
+                        } else {
+                            let lane_id = warp::lane_id();
+                            let base_lane = (lane_id / cg_size as u32) * cg_size as u32;
+                            let tile_mask = ((1u32 << cg_size) - 1) << base_lane;
+
+                            // SAFETY:
+                            // 1. `tile_mask` partitions the warp correctly for `cg_size`.
+                            // 2. All threads in the mask are active and converged.
+                            res = unsafe { container_ref.contains_cooperative(tile_mask, &key) };
+                        }
+
+                        if cg_size == 1 || (warp::lane_id() % cg_size as u32) == 0 {
+                            // SAFETY:
+                            // 1. We checked `idx < num_pairs`.
+                            // 2. The caller guarantees `output` is valid for `num_pairs` elements.
+                            // 3. We are writing to a unique index `idx` assigned to this thread (or group).
+                            unsafe { *output.add(idx) = res };
+                        }
+
+                        idx += loop_stride;
                     }
                 }
             }
