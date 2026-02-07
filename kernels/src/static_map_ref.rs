@@ -4,7 +4,7 @@
 //! fields as `OpenAddressingRefImpl` and delegates find/insert/contains to it on device.
 
 use crate::open_addressing::{EqualWrapper, ThreadScope};
-use crate::pair::{alignment, AlignedTo, Pair};
+use crate::pair::{AlignedTo, Pair, alignment};
 use crate::storage::{BucketStorageRef, Extent};
 use cust_core::DeviceCopy;
 
@@ -54,15 +54,8 @@ pub struct StaticMapRef<
 // Safety: StaticMapRef has the same layout as the ref impl components. All fields are
 // Copy and represent device-safe values (BucketStorageRef, Pair, Key, EqualWrapper, Scheme).
 // The pointer in BucketStorageRef is only dereferenced on device.
-unsafe impl<
-        Key,
-        Value,
-        Scheme,
-        const BUCKET_SIZE: usize,
-        KeyEqual,
-        const SCOPE: ThreadScope,
-    > DeviceCopy
-    for StaticMapRef<Key, Value, Scheme, BUCKET_SIZE, KeyEqual, SCOPE>
+unsafe impl<Key, Value, Scheme, const BUCKET_SIZE: usize, KeyEqual, const SCOPE: ThreadScope>
+    DeviceCopy for StaticMapRef<Key, Value, Scheme, BUCKET_SIZE, KeyEqual, SCOPE>
 where
     Key: DeviceCopy + Copy,
     Value: DeviceCopy + Copy,
@@ -75,14 +68,8 @@ where
 {
 }
 
-impl<
-        Key,
-        Value,
-        Scheme,
-        const BUCKET_SIZE: usize,
-        KeyEqual,
-        const SCOPE: ThreadScope,
-    > StaticMapRef<Key, Value, Scheme, BUCKET_SIZE, KeyEqual, SCOPE>
+impl<Key, Value, Scheme, const BUCKET_SIZE: usize, KeyEqual, const SCOPE: ThreadScope>
+    StaticMapRef<Key, Value, Scheme, BUCKET_SIZE, KeyEqual, SCOPE>
 where
     Key: Copy,
     Value: Copy,
@@ -166,14 +153,8 @@ where
 
 // Device-only operations: delegate to OpenAddressingRefImpl.
 #[cfg(target_arch = "nvptx64")]
-impl<
-        Key,
-        Value,
-        Scheme,
-        const BUCKET_SIZE: usize,
-        KeyEqual,
-        const SCOPE: ThreadScope,
-    > StaticMapRef<Key, Value, Scheme, BUCKET_SIZE, KeyEqual, SCOPE>
+impl<Key, Value, Scheme, const BUCKET_SIZE: usize, KeyEqual, const SCOPE: ThreadScope>
+    StaticMapRef<Key, Value, Scheme, BUCKET_SIZE, KeyEqual, SCOPE>
 where
     Key: DeviceCopy + Copy + PartialEq,
     Value: DeviceCopy + Copy + PartialEq,
@@ -185,7 +166,9 @@ where
 {
     /// Builds the open-addressing ref impl from this ref's fields.
     #[inline]
-    fn as_ref_impl(&self) -> OpenAddressingRefImpl<
+    fn as_ref_impl(
+        &self,
+    ) -> OpenAddressingRefImpl<
         Key,
         Value,
         Scheme,

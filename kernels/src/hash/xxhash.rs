@@ -87,7 +87,10 @@ impl<Key> XXHash32<Key> {
 
         if size >= 16 {
             let limit = size - 16;
-            let mut v1 = self.seed.wrapping_add(Self::PRIME1).wrapping_add(Self::PRIME2);
+            let mut v1 = self
+                .seed
+                .wrapping_add(Self::PRIME1)
+                .wrapping_add(Self::PRIME2);
             let mut v2 = self.seed.wrapping_add(Self::PRIME2);
             let mut v3 = self.seed;
             let mut v4 = self.seed.wrapping_sub(Self::PRIME1);
@@ -106,19 +109,22 @@ impl<Key> XXHash32<Key> {
                     v1 = v1.wrapping_mul(Self::PRIME1);
 
                     v2 = v2.wrapping_add(
-                        Self::load_chunk::<u32>(bytes, pipeline_offset + 1).wrapping_mul(Self::PRIME2),
+                        Self::load_chunk::<u32>(bytes, pipeline_offset + 1)
+                            .wrapping_mul(Self::PRIME2),
                     );
                     v2 = v2.rotate_left(13);
                     v2 = v2.wrapping_mul(Self::PRIME1);
 
                     v3 = v3.wrapping_add(
-                        Self::load_chunk::<u32>(bytes, pipeline_offset + 2).wrapping_mul(Self::PRIME2),
+                        Self::load_chunk::<u32>(bytes, pipeline_offset + 2)
+                            .wrapping_mul(Self::PRIME2),
                     );
                     v3 = v3.rotate_left(13);
                     v3 = v3.wrapping_mul(Self::PRIME1);
 
                     v4 = v4.wrapping_add(
-                        Self::load_chunk::<u32>(bytes, pipeline_offset + 3).wrapping_mul(Self::PRIME2),
+                        Self::load_chunk::<u32>(bytes, pipeline_offset + 3)
+                            .wrapping_mul(Self::PRIME2),
                     );
                     v4 = v4.rotate_left(13);
                     v4 = v4.wrapping_mul(Self::PRIME1);
@@ -142,7 +148,8 @@ impl<Key> XXHash32<Key> {
             while offset <= size - 4 {
                 // SAFETY: `offset <= size - 4` ensures we have at least 4 bytes remaining.
                 h32 = h32.wrapping_add(
-                    unsafe { Self::load_chunk::<u32>(bytes, offset / 4) }.wrapping_mul(Self::PRIME3),
+                    unsafe { Self::load_chunk::<u32>(bytes, offset / 4) }
+                        .wrapping_mul(Self::PRIME3),
                 );
                 h32 = h32.rotate_left(17).wrapping_mul(Self::PRIME4);
                 offset += 4;
@@ -268,7 +275,10 @@ impl<Key> XXHash64<Key> {
         // Data can be processed in 32-byte chunks
         if size >= 32 {
             let limit = size - 32;
-            let mut v1 = self.seed.wrapping_add(Self::PRIME1).wrapping_add(Self::PRIME2);
+            let mut v1 = self
+                .seed
+                .wrapping_add(Self::PRIME1)
+                .wrapping_add(Self::PRIME2);
             let mut v2 = self.seed.wrapping_add(Self::PRIME2);
             let mut v3 = self.seed;
             let mut v4 = self.seed.wrapping_sub(Self::PRIME1);
@@ -287,19 +297,22 @@ impl<Key> XXHash64<Key> {
                     v1 = v1.wrapping_mul(Self::PRIME1);
 
                     v2 = v2.wrapping_add(
-                        Self::load_chunk::<u64>(bytes, pipeline_offset + 1).wrapping_mul(Self::PRIME2),
+                        Self::load_chunk::<u64>(bytes, pipeline_offset + 1)
+                            .wrapping_mul(Self::PRIME2),
                     );
                     v2 = v2.rotate_left(31);
                     v2 = v2.wrapping_mul(Self::PRIME1);
 
                     v3 = v3.wrapping_add(
-                        Self::load_chunk::<u64>(bytes, pipeline_offset + 2).wrapping_mul(Self::PRIME2),
+                        Self::load_chunk::<u64>(bytes, pipeline_offset + 2)
+                            .wrapping_mul(Self::PRIME2),
                     );
                     v3 = v3.rotate_left(31);
                     v3 = v3.wrapping_mul(Self::PRIME1);
 
                     v4 = v4.wrapping_add(
-                        Self::load_chunk::<u64>(bytes, pipeline_offset + 3).wrapping_mul(Self::PRIME2),
+                        Self::load_chunk::<u64>(bytes, pipeline_offset + 3)
+                            .wrapping_mul(Self::PRIME2),
                     );
                     v4 = v4.rotate_left(31);
                     v4 = v4.wrapping_mul(Self::PRIME1);
@@ -348,10 +361,14 @@ impl<Key> XXHash64<Key> {
         if (size % 32) >= 8 {
             while offset <= size - 8 {
                 // SAFETY: `offset <= size - 8` ensures we have at least 8 bytes remaining.
-                let mut k1 = unsafe { Self::load_chunk::<u64>(bytes, offset / 8) }.wrapping_mul(Self::PRIME2);
+                let mut k1 = unsafe { Self::load_chunk::<u64>(bytes, offset / 8) }
+                    .wrapping_mul(Self::PRIME2);
                 k1 = k1.rotate_left(31).wrapping_mul(Self::PRIME1);
                 h64 ^= k1;
-                h64 = h64.rotate_left(27).wrapping_mul(Self::PRIME1).wrapping_add(Self::PRIME4);
+                h64 = h64
+                    .rotate_left(27)
+                    .wrapping_mul(Self::PRIME1)
+                    .wrapping_add(Self::PRIME4);
                 offset += 8;
             }
         }
@@ -360,8 +377,13 @@ impl<Key> XXHash64<Key> {
         if (size % 8) >= 4 {
             while offset <= size - 4 {
                 // SAFETY: `offset <= size - 4` ensures we have at least 4 bytes remaining.
-                h64 ^= (unsafe { Self::load_chunk::<u32>(bytes, offset / 4) } as u64 & 0xffffffffu64).wrapping_mul(Self::PRIME1);
-                h64 = h64.rotate_left(23).wrapping_mul(Self::PRIME2).wrapping_add(Self::PRIME3);
+                h64 ^= (unsafe { Self::load_chunk::<u32>(bytes, offset / 4) } as u64
+                    & 0xffffffffu64)
+                    .wrapping_mul(Self::PRIME1);
+                h64 = h64
+                    .rotate_left(23)
+                    .wrapping_mul(Self::PRIME2)
+                    .wrapping_add(Self::PRIME3);
                 offset += 4;
             }
         }

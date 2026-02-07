@@ -1,5 +1,5 @@
 //! Host-side StaticMap wrapper
-//! 
+//!
 //! This is a thin wrapper around the shared StaticMap implementation
 //! that adds host-specific functionality like kernel launching and
 //! device memory management.

@@ -3,7 +3,12 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn run(release: bool, arch: String, package: Option<String>, extra_args: Vec<String>) -> Result<()> {
+pub fn run(
+    release: bool,
+    arch: String,
+    package: Option<String>,
+    extra_args: Vec<String>,
+) -> Result<()> {
     let workspace_root = env::current_dir()?;
     let codegen_backend = find_codegen_backend(&workspace_root)?;
     let codegen_backend_dir = codegen_backend.parent().unwrap();
@@ -25,7 +30,7 @@ pub fn run(release: bool, arch: String, package: Option<String>, extra_args: Vec
         format!("-Cllvm-args=-arch={} --override-libm", arch),
         format!("-Ctarget-feature=+{}", arch),
     ];
-    
+
     let encoded_rustflags = rustflags.join("\x1f");
 
     // LD_LIBRARY_PATH
@@ -103,7 +108,7 @@ fn find_codegen_backend(workspace_root: &Path) -> Result<PathBuf> {
     // If rustc_codegen_nvvm is part of rust-cuda which is not in the root workspace, we might need to go into rust-cuda dir or use -p if it's available.
     // Given the shell script does: (cd "$workspace_root" && cargo build -p rustc_codegen_nvvm ...)
     // It assumes rustc_codegen_nvvm is available from root.
-    
+
     let status = Command::new("cargo")
         .args(&["build", "-p", "rustc_codegen_nvvm"])
         .current_dir(workspace_root)
@@ -120,10 +125,9 @@ fn find_codegen_backend(workspace_root: &Path) -> Result<PathBuf> {
             return Ok(path);
         }
     }
-    
+
     // As a fallback, try to find it via `find` equivalent if necessary, but shell script didn't.
     // However, cargo build -p rustc_codegen_nvvm might put it in target/debug/deps of the root workspace.
-    
+
     anyhow::bail!("Could not find librustc_codegen_nvvm.so after building")
 }
-

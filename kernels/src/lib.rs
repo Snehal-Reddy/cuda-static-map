@@ -11,18 +11,17 @@
 use cuda_std;
 
 pub mod hash;
+pub mod open_addressing;
 pub mod pair;
 pub mod probing;
-pub mod storage;
-pub mod open_addressing;
 pub mod static_map;
 pub mod static_map_ref;
+pub mod storage;
 
 pub use hash::{Hash, IdentityHash, XXHash32, XXHash64};
 pub use pair::{IsTupleLike, Pair, PairLike};
-#[cfg(not(target_arch = "nvptx64"))]
-pub use storage::{BucketStorage, Extent, make_valid_extent, make_valid_extent_for_scheme};
-pub use storage::BucketStorageRef;
 pub use static_map::StaticMap;
 pub use static_map_ref::StaticMapRef;
-
+pub use storage::BucketStorageRef;
+#[cfg(not(target_arch = "nvptx64"))]
+pub use storage::{BucketStorage, Extent, make_valid_extent, make_valid_extent_for_scheme};

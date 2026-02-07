@@ -51,17 +51,31 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { release, package, args } => {
+        Commands::Build {
+            release,
+            package,
+            args,
+        } => {
             build::run(release, package, args)?;
         }
-        Commands::BuildPtx { release, arch, package, args } => {
+        Commands::BuildPtx {
+            release,
+            arch,
+            package,
+            args,
+        } => {
             build_ptx::run(release, arch, package, args)?;
         }
-        Commands::BuildAll { release, arch, package, args } => {
+        Commands::BuildAll {
+            release,
+            arch,
+            package,
+            args,
+        } => {
             // Build host
             println!("--- Building Host ---");
             build::run(release, package.clone(), args.clone())?;
-            
+
             // Build device
             println!("\n--- Building PTX ---");
             build_ptx::run(release, arch, package, args)?;
@@ -70,4 +84,3 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-

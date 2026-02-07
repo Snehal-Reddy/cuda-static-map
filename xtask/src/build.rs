@@ -23,4 +23,3 @@ pub fn run(release: bool, package: Option<String>, extra_args: Vec<String>) -> R
 
     Ok(())
 }
-

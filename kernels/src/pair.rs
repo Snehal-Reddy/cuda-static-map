@@ -30,11 +30,11 @@ macro_rules! aligned_to {
                 #[repr(align($align))]
                 #[derive(Clone, Copy, Debug)]
                 pub struct Aligned;
-                
+
                 impl AlignedTo<$align> for () {
                     type Aligned = Aligned;
                 }
-                
+
                 // Safety: `Aligned` is a zero-sized type (ZST) with no fields. ZSTs are trivially
                 // copyable and contain no references or pointers, making them safe to copy
                 // to/from CUDA device memory.
@@ -165,10 +165,10 @@ where
 pub trait IsTupleLike {}
 
 impl<T1, T2> IsTupleLike for (T1, T2) {}
-impl<First, Second> IsTupleLike for Pair<First, Second>
-where
-    (): AlignedTo<{ alignment::<First, Second>() }>,
-{}
+impl<First, Second> IsTupleLike for Pair<First, Second> where
+    (): AlignedTo<{ alignment::<First, Second>() }>
+{
+}
 
 // GPU-specific implementations (only compiled when targeting nvptx64)
 #[cfg(target_arch = "nvptx64")]

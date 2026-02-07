@@ -4,17 +4,17 @@ use cust_core::DeviceCopy;
 use crate::hash::Hash;
 
 /// Identity hash function that returns the key as-is (with appropriate type conversion).
-/// 
+///
 /// This is a perfect hash function when `hash_table_capacity >= |input set|`.
-/// 
+///
 /// # Notes
 /// - Identity hash is only intended to be used perfectly
 /// - Perfect hashes are deterministic, and thus do not need seeds
 /// - Returns `u32` for keys ≤ 4 bytes, `u64` for keys > 4 bytes
-/// 
+///
 /// # Type Parameters
 /// * `Key` - The type of the values to hash. Must be convertible to `u32` or `u64`.
-/// 
+///
 /// The key type must be convertible to the result type. For keys ≤ 4 bytes,
 /// the key must be convertible to `u32`. For keys > 4 bytes, the key must be
 /// convertible to `u64`. This is enforced by the trait implementations.

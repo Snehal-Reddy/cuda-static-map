@@ -1,6 +1,6 @@
 //! Device memory storage abstraction for static map
 //!
-//! This module provides a storage abstraction, which manages a device 
+//! This module provides a storage abstraction, which manages a device
 //! memory buffer storing `Pair<Key, Value>` slots.
 //!
 //! The modern architecture supports bucket_size >= 1, with bucket-based storage
@@ -30,10 +30,10 @@ use cust_raw::driver_sys;
 #[cfg(not(target_arch = "nvptx64"))]
 use std::mem::size_of;
 
-#[cfg(not(target_arch = "nvptx64"))]
-use core::sync::atomic::{AtomicU32, AtomicU64};
 use core::marker::PhantomData;
 use core::sync::atomic::Ordering;
+#[cfg(not(target_arch = "nvptx64"))]
+use core::sync::atomic::{AtomicU32, AtomicU64};
 #[cfg(target_arch = "nvptx64")]
 use cuda_std::atomic::mid;
 
@@ -145,9 +145,9 @@ pub fn make_valid_extent(
         // Edge case: if stride is 0, return requested (shouldn't happen in practice)
         return Extent::new(requested.max(1));
     }
-    
+
     let num_groups = (requested + stride - 1) / stride; // Ceil division
-    
+
     if is_double_hashing {
         // For double hashing, find smallest prime >= num_groups
         // This ensures step size will be coprime with the table size
@@ -564,7 +564,10 @@ impl<'a, T, const SCOPE: ThreadScope> AtomicRef<'a, T, SCOPE> {
     /// # Safety
     /// The pointer must be valid and properly aligned for atomic operations.
     pub const unsafe fn new(ptr: *mut T) -> Self {
-        Self { ptr, _phantom: PhantomData }
+        Self {
+            ptr,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -577,14 +580,14 @@ impl<'a, const SCOPE: ThreadScope> AtomicRef<'a, u32, SCOPE> {
             // Safety: `AtomicRef::new` expects the caller to supply a valid pointer,
             // that is aligned and initialized. We forward ordering/scope unchanged.
             match SCOPE {
-                 ThreadScope::System => mid::atomic_fetch_add_u32_system(self.ptr, order, val),
-                 ThreadScope::Device => mid::atomic_fetch_add_u32_device(self.ptr, order, val),
-                 ThreadScope::Block => mid::atomic_fetch_add_u32_block(self.ptr, order, val),
-                 ThreadScope::Thread => {
-                     let old = core::ptr::read_volatile(self.ptr);
-                     core::ptr::write_volatile(self.ptr, old.wrapping_add(val));
-                     old
-                 }
+                ThreadScope::System => mid::atomic_fetch_add_u32_system(self.ptr, order, val),
+                ThreadScope::Device => mid::atomic_fetch_add_u32_device(self.ptr, order, val),
+                ThreadScope::Block => mid::atomic_fetch_add_u32_block(self.ptr, order, val),
+                ThreadScope::Thread => {
+                    let old = core::ptr::read_volatile(self.ptr);
+                    core::ptr::write_volatile(self.ptr, old.wrapping_add(val));
+                    old
+                }
             }
         }
     }
@@ -682,14 +685,14 @@ impl<'a, const SCOPE: ThreadScope> AtomicRef<'a, u64, SCOPE> {
     pub fn fetch_add(&self, val: u64, order: Ordering) -> u64 {
         unsafe {
             match SCOPE {
-                 ThreadScope::System => mid::atomic_fetch_add_u64_system(self.ptr, order, val),
-                 ThreadScope::Device => mid::atomic_fetch_add_u64_device(self.ptr, order, val),
-                 ThreadScope::Block => mid::atomic_fetch_add_u64_block(self.ptr, order, val),
-                 ThreadScope::Thread => {
-                     let old = core::ptr::read_volatile(self.ptr);
-                     core::ptr::write_volatile(self.ptr, old.wrapping_add(val));
-                     old
-                 }
+                ThreadScope::System => mid::atomic_fetch_add_u64_system(self.ptr, order, val),
+                ThreadScope::Device => mid::atomic_fetch_add_u64_device(self.ptr, order, val),
+                ThreadScope::Block => mid::atomic_fetch_add_u64_block(self.ptr, order, val),
+                ThreadScope::Thread => {
+                    let old = core::ptr::read_volatile(self.ptr);
+                    core::ptr::write_volatile(self.ptr, old.wrapping_add(val));
+                    old
+                }
             }
         }
     }
@@ -795,7 +798,10 @@ impl<T, const SCOPE: ThreadScope> CounterStorageRef<T, SCOPE> {
     /// # Safety
     /// `ptr` must point to valid device memory.
     pub const unsafe fn new(ptr: *mut T) -> Self {
-        Self { ptr, _phantom: PhantomData }
+        Self {
+            ptr,
+            _phantom: PhantomData,
+        }
     }
 
     /// Gets an atomic reference to the counter.
@@ -1005,17 +1011,26 @@ pub mod atomic_ops {
                 let old = match SCOPE {
                     ThreadScope::System => unsafe {
                         mid::atomic_compare_and_swap_u32_system(
-                            slot_ptr, expected_u32, desired_u32, Ordering::Relaxed
+                            slot_ptr,
+                            expected_u32,
+                            desired_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Device => unsafe {
                         mid::atomic_compare_and_swap_u32_device(
-                            slot_ptr, expected_u32, desired_u32, Ordering::Relaxed
+                            slot_ptr,
+                            expected_u32,
+                            desired_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Block => unsafe {
                         mid::atomic_compare_and_swap_u32_block(
-                            slot_ptr, expected_u32, desired_u32, Ordering::Relaxed
+                            slot_ptr,
+                            expected_u32,
+                            desired_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Thread => unsafe {
@@ -1040,17 +1055,26 @@ pub mod atomic_ops {
                 let old = match SCOPE {
                     ThreadScope::System => unsafe {
                         mid::atomic_compare_and_swap_u64_system(
-                            slot_ptr, expected, desired, Ordering::Relaxed
+                            slot_ptr,
+                            expected,
+                            desired,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Device => unsafe {
                         mid::atomic_compare_and_swap_u64_device(
-                            slot_ptr, expected, desired, Ordering::Relaxed
+                            slot_ptr,
+                            expected,
+                            desired,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Block => unsafe {
                         mid::atomic_compare_and_swap_u64_block(
-                            slot_ptr, expected, desired, Ordering::Relaxed
+                            slot_ptr,
+                            expected,
+                            desired,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Thread => unsafe {
@@ -1119,17 +1143,26 @@ pub mod atomic_ops {
                 let old = match SCOPE {
                     ThreadScope::System => unsafe {
                         mid::atomic_compare_and_swap_u32_system(
-                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                            key_ptr_u32,
+                            expected_key_u32,
+                            desired_key_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Device => unsafe {
                         mid::atomic_compare_and_swap_u32_device(
-                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                            key_ptr_u32,
+                            expected_key_u32,
+                            desired_key_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Block => unsafe {
                         mid::atomic_compare_and_swap_u32_block(
-                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                            key_ptr_u32,
+                            expected_key_u32,
+                            desired_key_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Thread => unsafe {
@@ -1151,17 +1184,26 @@ pub mod atomic_ops {
                 let old = match SCOPE {
                     ThreadScope::System => unsafe {
                         mid::atomic_compare_and_swap_u64_system(
-                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                            key_ptr_u64,
+                            expected_key,
+                            desired_key,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Device => unsafe {
                         mid::atomic_compare_and_swap_u64_device(
-                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                            key_ptr_u64,
+                            expected_key,
+                            desired_key,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Block => unsafe {
                         mid::atomic_compare_and_swap_u64_block(
-                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                            key_ptr_u64,
+                            expected_key,
+                            desired_key,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Thread => unsafe {
@@ -1198,17 +1240,26 @@ pub mod atomic_ops {
                     let old = match SCOPE {
                         ThreadScope::System => unsafe {
                             mid::atomic_compare_and_swap_u32_system(
-                                value_ptr_u32, expected_value_u32, desired_value_u32, Ordering::Relaxed
+                                value_ptr_u32,
+                                expected_value_u32,
+                                desired_value_u32,
+                                Ordering::Relaxed,
                             )
                         },
                         ThreadScope::Device => unsafe {
                             mid::atomic_compare_and_swap_u32_device(
-                                value_ptr_u32, expected_value_u32, desired_value_u32, Ordering::Relaxed
+                                value_ptr_u32,
+                                expected_value_u32,
+                                desired_value_u32,
+                                Ordering::Relaxed,
                             )
                         },
                         ThreadScope::Block => unsafe {
                             mid::atomic_compare_and_swap_u32_block(
-                                value_ptr_u32, expected_value_u32, desired_value_u32, Ordering::Relaxed
+                                value_ptr_u32,
+                                expected_value_u32,
+                                desired_value_u32,
+                                Ordering::Relaxed,
                             )
                         },
                         ThreadScope::Thread => unsafe {
@@ -1236,17 +1287,26 @@ pub mod atomic_ops {
                     let old = match SCOPE {
                         ThreadScope::System => unsafe {
                             mid::atomic_compare_and_swap_u64_system(
-                                value_ptr_u64, current_expected, desired_value, Ordering::Relaxed
+                                value_ptr_u64,
+                                current_expected,
+                                desired_value,
+                                Ordering::Relaxed,
                             )
                         },
                         ThreadScope::Device => unsafe {
                             mid::atomic_compare_and_swap_u64_device(
-                                value_ptr_u64, current_expected, desired_value, Ordering::Relaxed
+                                value_ptr_u64,
+                                current_expected,
+                                desired_value,
+                                Ordering::Relaxed,
                             )
                         },
                         ThreadScope::Block => unsafe {
                             mid::atomic_compare_and_swap_u64_block(
-                                value_ptr_u64, current_expected, desired_value, Ordering::Relaxed
+                                value_ptr_u64,
+                                current_expected,
+                                desired_value,
+                                Ordering::Relaxed,
                             )
                         },
                         ThreadScope::Thread => unsafe {
@@ -1323,17 +1383,26 @@ pub mod atomic_ops {
                 let old = match SCOPE {
                     ThreadScope::System => unsafe {
                         mid::atomic_compare_and_swap_u32_system(
-                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                            key_ptr_u32,
+                            expected_key_u32,
+                            desired_key_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Device => unsafe {
                         mid::atomic_compare_and_swap_u32_device(
-                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                            key_ptr_u32,
+                            expected_key_u32,
+                            desired_key_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Block => unsafe {
                         mid::atomic_compare_and_swap_u32_block(
-                            key_ptr_u32, expected_key_u32, desired_key_u32, Ordering::Relaxed
+                            key_ptr_u32,
+                            expected_key_u32,
+                            desired_key_u32,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Thread => unsafe {
@@ -1355,17 +1424,26 @@ pub mod atomic_ops {
                 let old = match SCOPE {
                     ThreadScope::System => unsafe {
                         mid::atomic_compare_and_swap_u64_system(
-                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                            key_ptr_u64,
+                            expected_key,
+                            desired_key,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Device => unsafe {
                         mid::atomic_compare_and_swap_u64_device(
-                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                            key_ptr_u64,
+                            expected_key,
+                            desired_key,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Block => unsafe {
                         mid::atomic_compare_and_swap_u64_block(
-                            key_ptr_u64, expected_key, desired_key, Ordering::Relaxed
+                            key_ptr_u64,
+                            expected_key,
+                            desired_key,
+                            Ordering::Relaxed,
                         )
                     },
                     ThreadScope::Thread => unsafe {
@@ -1571,7 +1649,12 @@ pub mod atomic_ops {
                 // Safety: key_ptr is valid and aligned per function safety requirements
                 let key_atomic = unsafe { &*(key_ptr as *mut AtomicU64) };
                 key_atomic
-                    .compare_exchange(expected_key, desired_key, Ordering::Relaxed, Ordering::Relaxed)
+                    .compare_exchange(
+                        expected_key,
+                        desired_key,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
                     .is_ok()
             }
             _ => false,
@@ -1657,7 +1740,12 @@ pub mod atomic_ops {
                 // Safety: key_ptr is valid and aligned per function safety requirements
                 let key_atomic = unsafe { &*(key_ptr as *mut AtomicU64) };
                 key_atomic
-                    .compare_exchange(expected_key, desired_key, Ordering::Relaxed, Ordering::Relaxed)
+                    .compare_exchange(
+                        expected_key,
+                        desired_key,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
                     .is_ok()
             }
             _ => false,
@@ -1698,7 +1786,7 @@ pub mod atomic_ops {
     pub unsafe fn wait_for_payload<const SCOPE: ThreadScope>(
         value_ptr: *mut u8,
         empty_value: u64,
-        value_size: usize
+        value_size: usize,
     ) {
         loop {
             let current = match value_size {

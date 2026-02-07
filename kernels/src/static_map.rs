@@ -4,14 +4,12 @@
 //! When compiled for GPU (nvptx64-nvidia-cuda), it generates PTX code.
 //! When compiled for CPU, it's used as a regular Rust library.
 
-use crate::pair::{alignment, AlignedTo, Pair};
+use crate::pair::{AlignedTo, Pair, alignment};
 
 #[cfg(not(target_arch = "nvptx64"))]
 use crate::open_addressing::OpenAddressingImpl;
 #[cfg(not(target_arch = "nvptx64"))]
 use crate::probing::ProbingScheme;
-#[cfg(not(target_arch = "nvptx64"))]
-use cust::stream::Stream;
 #[cfg(not(target_arch = "nvptx64"))]
 use cust::error::CudaResult;
 #[cfg(not(target_arch = "nvptx64"))]
@@ -20,6 +18,8 @@ use cust::launch;
 use cust::memory::{AsyncCopyDestination, DeviceBuffer};
 #[cfg(not(target_arch = "nvptx64"))]
 use cust::module::Module;
+#[cfg(not(target_arch = "nvptx64"))]
+use cust::stream::Stream;
 use cust_core::DeviceCopy;
 
 /// A GPU-accelerated, unordered, associative container of key-value pairs with unique keys.
@@ -48,9 +48,10 @@ pub struct StaticMap<
     Scheme,
     const BUCKET_SIZE: usize = 1,
     KeyEqual = crate::open_addressing::DefaultKeyEqual,
-    const SCOPE: crate::open_addressing::ThreadScope = { crate::open_addressing::ThreadScope::Device },
->
-where
+    const SCOPE: crate::open_addressing::ThreadScope = {
+        crate::open_addressing::ThreadScope::Device
+    },
+> where
     Key: DeviceCopy + Copy + PartialEq,
     Value: DeviceCopy + Copy,
     Scheme: crate::probing::ProbingScheme<Key>,
@@ -221,14 +222,9 @@ where
     ///
     /// The returned ref can be passed by value to GPU kernels, which may then call
     /// `.find()`, `.insert()`, and `.contains()` on it.
-    pub fn device_ref(&self) -> crate::static_map_ref::StaticMapRef<
-        Key,
-        Value,
-        Scheme,
-        BUCKET_SIZE,
-        KeyEqual,
-        SCOPE,
-    > {
+    pub fn device_ref(
+        &self,
+    ) -> crate::static_map_ref::StaticMapRef<Key, Value, Scheme, BUCKET_SIZE, KeyEqual, SCOPE> {
         use crate::open_addressing::EqualWrapper;
         let empty_key = self.impl_.empty_key_sentinel();
         let empty_value = self.empty_value_sentinel();
@@ -401,7 +397,10 @@ impl_bulk_ops_for_canonical_type!(1, 2, 4, 8);
 #[cfg(not(target_arch = "nvptx64"))]
 fn grid_size_for_bulk(num_keys: usize, cg_size: usize, block_size: u32) -> u32 {
     let block = block_size as usize;
-    let g = (num_keys.saturating_mul(cg_size).saturating_add(block.saturating_sub(1))) / block;
+    let g = (num_keys
+        .saturating_mul(cg_size)
+        .saturating_add(block.saturating_sub(1)))
+        / block;
     (g.min(core::u32::MAX as usize) as u32).max(1)
 }
 

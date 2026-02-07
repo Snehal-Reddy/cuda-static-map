@@ -1,15 +1,15 @@
 //! Open addressing primitives and abstractions.
 
 #[cfg(not(target_arch = "nvptx64"))]
-use cust::stream::Stream;
+use crate::storage::{BucketStorage, make_valid_extent_for_scheme};
 #[cfg(not(target_arch = "nvptx64"))]
 use cust::error::CudaResult;
 #[cfg(not(target_arch = "nvptx64"))]
-use crate::storage::{BucketStorage, make_valid_extent_for_scheme};
+use cust::stream::Stream;
 
-use crate::storage::{BucketStorageRef};
-use crate::pair::{Pair, AlignedTo, alignment};
+use crate::pair::{AlignedTo, Pair, alignment};
 use crate::probing::ProbingScheme;
+use crate::storage::BucketStorageRef;
 use cust_core::DeviceCopy;
 
 /// Thread scope for atomic operations.
@@ -217,11 +217,7 @@ where
     /// * `EqualResult::Equal` if the keys are equivalent
     /// * `EqualResult::Unequal` otherwise
     #[inline]
-    pub fn equal_to<ProbeKey: ?Sized>(
-        &self,
-        probe_key: &ProbeKey,
-        slot_key: &Key,
-    ) -> EqualResult
+    pub fn equal_to<ProbeKey: ?Sized>(&self, probe_key: &ProbeKey, slot_key: &Key) -> EqualResult
     where
         ProbeKey: PartialEq<Key>,
     {
@@ -262,8 +258,8 @@ where
         // Check for sentinels (Available = Empty or Erased)
         // Use bitwise comparison to handle NaNs and ensure we only match
         // strict sentinel values (including padding).
-        if bitwise_compare(slot_key, &self.empty_sentinel) 
-            || bitwise_compare(slot_key, &self.erased_sentinel) 
+        if bitwise_compare(slot_key, &self.empty_sentinel)
+            || bitwise_compare(slot_key, &self.erased_sentinel)
         {
             return EqualResult::Available;
         }
@@ -347,8 +343,7 @@ pub struct OpenAddressingImpl<
     const BUCKET_SIZE: usize,
     KeyEqual,
     const SCOPE: ThreadScope,
->
-where
+> where
     Key: DeviceCopy + Copy + PartialEq,
     Value: DeviceCopy + Copy,
     Scheme: ProbingScheme<Key>,
@@ -535,7 +530,8 @@ where
     /// # Arguments
     /// * `stream` - CUDA stream used for the operation
     pub fn clear(&mut self, stream: &Stream) -> CudaResult<()> {
-        self.storage.initialize(self.empty_slot_sentinel, stream, None)
+        self.storage
+            .initialize(self.empty_slot_sentinel, stream, None)
     }
 
     /// Clears the container asynchronously.
@@ -549,7 +545,8 @@ where
     /// * `stream` - CUDA stream used for the operation
     pub unsafe fn clear_async(&mut self, stream: &Stream) -> CudaResult<()> {
         unsafe {
-            self.storage.initialize_async(self.empty_slot_sentinel, stream, None)
+            self.storage
+                .initialize_async(self.empty_slot_sentinel, stream, None)
         }
     }
 
@@ -619,7 +616,10 @@ struct KeySizeCheck<T>(core::marker::PhantomData<T>);
 
 #[cfg(target_arch = "nvptx64")]
 impl<T> KeySizeCheck<T> {
-    const CHECK: () = assert!(core::mem::size_of::<T>() <= 8, "Container does not support key types larger than 8 bytes.");
+    const CHECK: () = assert!(
+        core::mem::size_of::<T>() <= 8,
+        "Container does not support key types larger than 8 bytes."
+    );
 }
 
 #[cfg(target_arch = "nvptx64")]
@@ -646,14 +646,14 @@ pub struct OpenAddressingRefImpl<
 
 #[cfg(target_arch = "nvptx64")]
 impl<
-        Key,
-        Value,
-        Scheme,
-        const BUCKET_SIZE: usize,
-        KeyEqual,
-        const SCOPE: ThreadScope,
-        const ALLOWS_DUPLICATES: bool,
-    >
+    Key,
+    Value,
+    Scheme,
+    const BUCKET_SIZE: usize,
+    KeyEqual,
+    const SCOPE: ThreadScope,
+    const ALLOWS_DUPLICATES: bool,
+>
     OpenAddressingRefImpl<
         Key,
         Value,
@@ -701,7 +701,9 @@ where
     pub fn find(&self, key: &Key) -> Option<Value> {
         // Use the probing scheme to get an iterator over the probe sequence
         let capacity = self.storage_ref.capacity();
-        let mut iter = self.probing_scheme.make_iterator(key, BUCKET_SIZE, capacity);
+        let mut iter = self
+            .probing_scheme
+            .make_iterator(key, BUCKET_SIZE, capacity);
         let init_idx = iter.current(); // Store initial index for wrap-around detection
 
         loop {
@@ -734,7 +736,8 @@ where
                             //   reference to the `Value` field of that pair (we never alias this slot mutably elsewhere in
                             //   this function), so casting it to `*mut u8` yields a valid, aligned pointer to the value.
                             let val_ptr = unsafe {
-                                &mut (*(slot_ptr as *mut Pair<Key, Value>)).second as *mut Value as *mut u8
+                                &mut (*(slot_ptr as *mut Pair<Key, Value>)).second as *mut Value
+                                    as *mut u8
                             };
 
                             let val_size = core::mem::size_of::<Value>();
@@ -771,7 +774,7 @@ where
                                 atomic_ops::wait_for_payload::<SCOPE>(
                                     val_ptr,
                                     empty_val_u64,
-                                    val_size
+                                    val_size,
                                 );
                             }
                         }
@@ -795,7 +798,7 @@ where
             iter.next();
             // Check if we've wrapped around to the initial index
             if iter.current() == init_idx {
-                return None;  // Key not found
+                return None; // Key not found
             }
         }
     }
@@ -815,7 +818,9 @@ where
         let key = value.first;
         let capacity = self.storage_ref.capacity();
 
-        let mut iter = self.probing_scheme.make_iterator(&key, BUCKET_SIZE, capacity);
+        let mut iter = self
+            .probing_scheme
+            .make_iterator(&key, BUCKET_SIZE, capacity);
         let init_idx = iter.current(); // Store initial index for wrap-around detection
 
         let pair_size = core::mem::size_of::<Pair<Key, Value>>();
@@ -848,7 +853,10 @@ where
                 let slot_val = unsafe { *slot_ptr };
                 let slot_key = slot_val.first;
 
-                match self.predicate.equal_for_insert(&key, &slot_key, ALLOWS_DUPLICATES) {
+                match self
+                    .predicate
+                    .equal_for_insert(&key, &slot_key, ALLOWS_DUPLICATES)
+                {
                     EqualResult::Equal => {
                         return true;
                     }
@@ -871,23 +879,24 @@ where
                             unsafe {
                                 let mut expected_u64 = 0u64;
                                 core::ptr::copy_nonoverlapping(
-                                    &self.empty_slot_sentinel as *const Pair<Key, Value> as *const u8,
+                                    &self.empty_slot_sentinel as *const Pair<Key, Value>
+                                        as *const u8,
                                     &mut expected_u64 as *mut u64 as *mut u8,
-                                    pair_size
+                                    pair_size,
                                 );
 
                                 let mut desired_u64 = 0u64;
                                 core::ptr::copy_nonoverlapping(
                                     &value as *const Pair<Key, Value> as *const u8,
                                     &mut desired_u64 as *mut u64 as *mut u8,
-                                    pair_size
+                                    pair_size,
                                 );
 
                                 atomic_ops::packed_cas::<SCOPE>(
                                     slot_u8,
                                     expected_u64,
                                     desired_u64,
-                                    pair_size
+                                    pair_size,
                                 )
                             }
                         } else {
@@ -917,18 +926,33 @@ where
                             unsafe {
                                 let get_u64 = |ptr: *const u8, size: usize| -> u64 {
                                     let mut temp = 0u64;
-                                    core::ptr::copy_nonoverlapping(ptr, &mut temp as *mut u64 as *mut u8, size);
+                                    core::ptr::copy_nonoverlapping(
+                                        ptr,
+                                        &mut temp as *mut u64 as *mut u8,
+                                        size,
+                                    );
                                     temp
                                 };
 
-                                let expected_key_u64 = get_u64(&self.empty_slot_sentinel.first as *const Key as *const u8, key_size);
-                                let desired_key_u64 = get_u64(&value.first as *const Key as *const u8, key_size);
+                                let expected_key_u64 = get_u64(
+                                    &self.empty_slot_sentinel.first as *const Key as *const u8,
+                                    key_size,
+                                );
+                                let desired_key_u64 =
+                                    get_u64(&value.first as *const Key as *const u8, key_size);
 
                                 if val_size <= 8 {
-                                    let expected_val_u64 = get_u64(&self.empty_slot_sentinel.second as *const Value as *const u8, val_size);
-                                    let desired_val_u64 = get_u64(&value.second as *const Value as *const u8, val_size);
+                                    let expected_val_u64 = get_u64(
+                                        &self.empty_slot_sentinel.second as *const Value
+                                            as *const u8,
+                                        val_size,
+                                    );
+                                    let desired_val_u64 = get_u64(
+                                        &value.second as *const Value as *const u8,
+                                        val_size,
+                                    );
 
-                                     atomic_ops::back_to_back_cas::<SCOPE>(
+                                    atomic_ops::back_to_back_cas::<SCOPE>(
                                         &mut (*slot_ptr).first as *mut Key as *mut u8,
                                         &mut (*slot_ptr).second as *mut Value as *mut u8,
                                         expected_key_u64,
@@ -936,19 +960,22 @@ where
                                         expected_val_u64,
                                         desired_val_u64,
                                         key_size,
-                                        val_size
+                                        val_size,
                                     )
                                 } else {
-                                    let desired_val_u64 = get_u64(&value.second as *const Value as *const u8, 8.min(val_size));
+                                    let desired_val_u64 = get_u64(
+                                        &value.second as *const Value as *const u8,
+                                        8.min(val_size),
+                                    );
 
-                                     atomic_ops::cas_dependent_write::<SCOPE>(
+                                    atomic_ops::cas_dependent_write::<SCOPE>(
                                         &mut (*slot_ptr).first as *mut Key as *mut u8,
                                         &mut (*slot_ptr).second as *mut Value as *mut u8,
                                         expected_key_u64,
                                         desired_key_u64,
                                         desired_val_u64,
                                         key_size,
-                                        val_size
+                                        val_size,
                                     )
                                 }
                             }
@@ -965,7 +992,7 @@ where
             iter.next();
             // Check if we've wrapped around to the initial index
             if iter.current() == init_idx {
-                return false;  // Map is full (should not happen with proper sizing)
+                return false; // Map is full (should not happen with proper sizing)
             }
         }
     }
