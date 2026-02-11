@@ -10,8 +10,12 @@ fn main() {
     let out_path = path::PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = path::PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
-    CudaBuilder::new(manifest_dir.join("kernels"))
-        .copy_to(out_path.join("kernels.ptx"))
-        .build()
-        .unwrap();
+    let mut builder =
+        CudaBuilder::new(manifest_dir.join("kernels")).copy_to(out_path.join("kernels.ptx"));
+
+    if env::var("CARGO_FEATURE_TEST_KERNELS").is_ok() {
+        builder = builder.build_args(&["--features", "test-kernels"]);
+    }
+
+    builder.build().unwrap();
 }

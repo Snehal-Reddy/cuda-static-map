@@ -7,13 +7,21 @@ edition = "2024"
 primal = "0.3"
 
 [dependencies]
-cuda_std = { path = "../rust-cuda/crates/cuda_std" }
+cuda_std = { path = "../rust-cuda/crates/cuda_std", optional = true }
 cust_core = { path = "../rust-cuda/crates/cust_core" }
 paste = "1.0"
+
+[features]
+test-kernels = ["dep:cuda_std"]
 
 [target.'cfg(not(target_arch = "nvptx64"))'.dependencies]
 cust = { path = "../rust-cuda/crates/cust" }
 cust_raw = { path = "../rust-cuda/crates/cust_raw", default-features = false, features = ["driver"] }
+
+[target.'cfg(target_arch = "nvptx64")'.dependencies]
+cuda_std = { path = "../rust-cuda/crates/cuda_std" }
+
+
 
 [lib]
 crate-type = ["cdylib", "rlib"]

@@ -25,3 +25,6 @@ pub use static_map_ref::StaticMapRef;
 pub use storage::BucketStorageRef;
 #[cfg(not(target_arch = "nvptx64"))]
 pub use storage::{BucketStorage, Extent, make_valid_extent, make_valid_extent_for_scheme};
+
+#[cfg(all(target_arch = "nvptx64", feature = "test-kernels"))]
+pub mod test_kernels;

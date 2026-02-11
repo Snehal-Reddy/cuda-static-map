@@ -5,6 +5,10 @@
 
 static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
+pub fn get_ptx() -> &'static str {
+    PTX
+}
+
 pub mod static_map;
 
 // Re-export main types

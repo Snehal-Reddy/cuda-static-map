@@ -17,3 +17,6 @@ cuda-static-map-kernels = { path = "kernels" }
 
 [build-dependencies]
 cuda_builder = { path = "rust-cuda/crates/cuda_builder", default-features = false, features = ["rustc_codegen_nvvm"] }
+
+[features]
+test-kernels = []
