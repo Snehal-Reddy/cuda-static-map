@@ -8,6 +8,7 @@ use cuda_static_map_kernels::open_addressing::{DefaultKeyEqual, ThreadScope};
 use cuda_static_map_kernels::pair::{Pair};
 use cuda_static_map_kernels::probing::LinearProbing;
 use cust::prelude::*;
+use cust::memory::LockedBuffer;
 use std::error::Error;
 
 // Helper to init CUDA
@@ -17,6 +18,531 @@ fn setup_cuda() -> Result<(Context, Stream), Box<dyn Error>> {
     let ctx = Context::new(device)?;
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
     Ok((ctx, stream))
+}
+
+// Test helper utilities
+mod test_helpers {
+    use super::*;
+
+    pub type TestMap = StaticMap<
+        u64,
+        u64,
+        LinearProbing<u64, IdentityHash<u64>>,
+        1,
+        DefaultKeyEqual,
+        { ThreadScope::Device },
+    >;
+
+    pub fn create_test_map(
+        capacity: usize,
+        stream: &Stream,
+    ) -> Result<TestMap, Box<dyn Error>> {
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+        Ok(TestMap::new(capacity, empty_key, empty_val, pred, probing, stream)?)
+    }
+
+    pub fn create_test_map_with_module(
+        capacity: usize,
+        stream: &Stream,
+    ) -> Result<(TestMap, Module), Box<dyn Error>> {
+        let map = create_test_map(capacity, stream)?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+        Ok((map, module))
+    }
+}
+
+// Basic Operations Tests
+mod basic_operations {
+    use super::*;
+    use super::test_helpers::*;
+
+    mod insert {
+        use super::*;
+
+        /// Test inserting a single key-value pair
+        #[test]
+        fn test_single_insert() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert single pair
+            let pairs = vec![Pair::new(42u64, 100u64)];
+            let success_count = map.insert(&pairs, &stream, &module)?;
+            assert_eq!(success_count, 1, "Single insert should succeed");
+
+            // Verify it was inserted by finding it
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.find(&[42u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert_eq!(output[0], 100u64, "Found value should match inserted value");
+
+            Ok(())
+        }
+
+        /// Test inserting multiple pairs sequentially (batch insert)
+        #[test]
+        fn test_batch_insert() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert multiple pairs
+            let num_items = 100;
+            let mut pairs = Vec::with_capacity(num_items);
+            for i in 0..num_items {
+                pairs.push(Pair::new(i as u64, (i * 10) as u64));
+            }
+
+            let success_count = map.insert(&pairs, &stream, &module)?;
+            assert_eq!(
+                success_count, num_items,
+                "All inserts should succeed"
+            );
+
+            // Verify all were inserted
+            let keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+            let mut output = unsafe { LockedBuffer::uninitialized(num_items)? };
+            unsafe {
+                map.find(&keys, output.as_mut_slice(), &stream, &module)?;
+            }
+
+            for i in 0..num_items {
+                assert_eq!(
+                    output[i],
+                    (i * 10) as u64,
+                    "Value mismatch at index {}",
+                    i
+                );
+            }
+
+            Ok(())
+        }
+
+        /// Test inserting duplicate keys - second insert should return true (key exists)
+        #[test]
+        fn test_duplicate_key_insert() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert first pair
+            let pairs1 = vec![Pair::new(42u64, 100u64)];
+            let success1 = map.insert(&pairs1, &stream, &module)?;
+            assert_eq!(success1, 1, "First insert should succeed");
+
+            // Insert same key with different value
+            let pairs2 = vec![Pair::new(42u64, 200u64)];
+            let success2 = map.insert(&pairs2, &stream, &module)?;
+            // The insert should succeed (return true) but the value may or may not be updated
+            // depending on implementation. Let's check what value is stored.
+            assert_eq!(success2, 1, "Duplicate key insert should return success");
+
+            // Verify the value (implementation may keep first or update to second)
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.find(&[42u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            // The value should be either 100 or 200 depending on implementation
+            assert!(
+                output[0] == 100u64 || output[0] == 200u64,
+                "Value should be one of the inserted values"
+            );
+
+            Ok(())
+        }
+
+        /// Test inserting into an empty map
+        #[test]
+        fn test_empty_map_insert() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert into freshly created map
+            let pairs = vec![Pair::new(1u64, 2u64)];
+            let success_count = map.insert(&pairs, &stream, &module)?;
+            assert_eq!(success_count, 1, "Insert into empty map should succeed");
+
+            Ok(())
+        }
+
+        /// Test attempting to insert when map is at capacity
+        #[test]
+        fn test_full_map_insert() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            // Use small capacity to test full map behavior
+            let capacity = 16;
+            let (mut map, module) = create_test_map_with_module(capacity, &stream)?;
+
+            // Fill the map
+            let mut pairs = Vec::new();
+            for i in 0..capacity {
+                pairs.push(Pair::new(i as u64, (i * 10) as u64));
+            }
+
+            let success_count = map.insert(&pairs, &stream, &module)?;
+            // All should succeed if capacity is sufficient
+            assert_eq!(
+                success_count, capacity,
+                "All inserts should succeed when within capacity"
+            );
+
+            // Try to insert one more - may fail or succeed depending on load factor
+            let extra_pair = vec![Pair::new(capacity as u64, (capacity * 10) as u64)];
+            let extra_success = map.insert(&extra_pair, &stream, &module)?;
+            // This may succeed or fail depending on load factor and probing
+            // Just verify the function doesn't panic
+            assert!(
+                extra_success <= 1,
+                "Extra insert should return 0 or 1"
+            );
+
+            Ok(())
+        }
+    }
+
+    mod find {
+        use super::*;
+
+        /// Test finding an existing key
+        #[test]
+        fn test_find_existing_key() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert a pair
+            let pairs = vec![Pair::new(42u64, 100u64)];
+            map.insert(&pairs, &stream, &module)?;
+
+            // Find it
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.find(&[42u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert_eq!(output[0], 100u64, "Found value should match");
+
+            Ok(())
+        }
+
+        /// Test finding a non-existent key
+        #[test]
+        fn test_find_non_existent_key() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Try to find a key that was never inserted
+            let empty_val = map.empty_value_sentinel();
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.find(&[999u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert_eq!(
+                output[0], empty_val,
+                "Non-existent key should return empty sentinel"
+            );
+
+            Ok(())
+        }
+
+        /// Test finding immediately after insert
+        #[test]
+        fn test_find_after_insert() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert and immediately find
+            let pairs = vec![Pair::new(42u64, 100u64)];
+            map.insert(&pairs, &stream, &module)?;
+
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.find(&[42u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert_eq!(output[0], 100u64, "Should find immediately after insert");
+
+            Ok(())
+        }
+
+        /// Test finding multiple keys (batch find)
+        #[test]
+        fn test_find_multiple_keys() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert multiple pairs
+            let num_items = 50;
+            let mut pairs = Vec::with_capacity(num_items);
+            for i in 0..num_items {
+                pairs.push(Pair::new(i as u64, (i * 10) as u64));
+            }
+            map.insert(&pairs, &stream, &module)?;
+
+            // Find all of them
+            let keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+            let mut output = unsafe { LockedBuffer::uninitialized(num_items)? };
+            unsafe {
+                map.find(&keys, output.as_mut_slice(), &stream, &module)?;
+            }
+
+            for i in 0..num_items {
+                assert_eq!(
+                    output[i],
+                    (i * 10) as u64,
+                    "Batch find mismatch at index {}",
+                    i
+                );
+            }
+
+            Ok(())
+        }
+
+        /// Test finding with sentinel values
+        #[test]
+        fn test_find_with_sentinel() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (map, module) = create_test_map_with_module(1024, &stream)?;
+
+            let empty_val = map.empty_value_sentinel();
+            let empty_key = map.empty_key_sentinel();
+
+            // Try to find the empty key sentinel (should return empty value)
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.find(&[empty_key], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert_eq!(
+                output[0], empty_val,
+                "Finding empty key sentinel should return empty value sentinel"
+            );
+
+            Ok(())
+        }
+    }
+
+    mod contains {
+        use super::*;
+
+        /// Test contains for existing key
+        #[test]
+        fn test_contains_existing_key() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert a pair
+            let pairs = vec![Pair::new(42u64, 100u64)];
+            map.insert(&pairs, &stream, &module)?;
+
+            // Check contains
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.contains(&[42u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert!(output[0], "Contains should return true for existing key");
+
+            Ok(())
+        }
+
+        /// Test contains for non-existent key
+        #[test]
+        fn test_contains_non_existent_key() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Check contains for key that was never inserted
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.contains(&[999u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert!(!output[0], "Contains should return false for non-existent key");
+
+            Ok(())
+        }
+
+        /// Test contains immediately after insert
+        #[test]
+        fn test_contains_after_insert() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert and immediately check contains
+            let pairs = vec![Pair::new(42u64, 100u64)];
+            map.insert(&pairs, &stream, &module)?;
+
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.contains(&[42u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert!(output[0], "Should contain key immediately after insert");
+
+            Ok(())
+        }
+
+        /// Test batch contains operation
+        #[test]
+        fn test_batch_contains() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert some pairs
+            let num_items = 50;
+            let mut pairs = Vec::with_capacity(num_items);
+            for i in 0..num_items {
+                pairs.push(Pair::new(i as u64, (i * 10) as u64));
+            }
+            map.insert(&pairs, &stream, &module)?;
+
+            // Check contains for all inserted keys plus some non-existent ones
+            let keys: Vec<u64> = (0..num_items + 10).map(|i| i as u64).collect();
+            let mut output = unsafe { LockedBuffer::uninitialized(num_items + 10)? };
+            unsafe {
+                map.contains(&keys, output.as_mut_slice(), &stream, &module)?;
+            }
+
+            // First num_items should be true, rest should be false
+            for i in 0..num_items {
+                assert!(
+                    output[i],
+                    "Contains should return true for inserted key at index {}",
+                    i
+                );
+            }
+            for i in num_items..num_items + 10 {
+                assert!(
+                    !output[i],
+                    "Contains should return false for non-existent key at index {}",
+                    i
+                );
+            }
+
+            Ok(())
+        }
+    }
+
+    mod clear {
+        use super::*;
+
+        /// Test clearing an empty map
+        #[test]
+        fn test_clear_empty_map() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, _module) = create_test_map_with_module(1024, &stream)?;
+
+            // Clear empty map should not panic
+            map.clear(&stream)?;
+            stream.synchronize()?;
+
+            Ok(())
+        }
+
+        /// Test clearing a populated map
+        #[test]
+        fn test_clear_populated_map() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert items
+            let num_items = 50;
+            let mut pairs = Vec::with_capacity(num_items);
+            for i in 0..num_items {
+                pairs.push(Pair::new(i as u64, (i * 10) as u64));
+            }
+            map.insert(&pairs, &stream, &module)?;
+
+            // Clear the map
+            map.clear(&stream)?;
+            stream.synchronize()?;
+
+            // Verify all items are gone
+            let keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+            let empty_val = map.empty_value_sentinel();
+            let mut output = unsafe { LockedBuffer::uninitialized(num_items)? };
+            unsafe {
+                map.find(&keys, output.as_mut_slice(), &stream, &module)?;
+            }
+
+            for i in 0..num_items {
+                assert_eq!(
+                    output[i], empty_val,
+                    "After clear, find should return empty sentinel at index {}",
+                    i
+                );
+            }
+
+            Ok(())
+        }
+
+        /// Test clearing then inserting new items
+        #[test]
+        fn test_clear_then_insert() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert initial items
+            let pairs1 = vec![Pair::new(1u64, 10u64), Pair::new(2u64, 20u64)];
+            map.insert(&pairs1, &stream, &module)?;
+
+            // Clear
+            map.clear(&stream)?;
+            stream.synchronize()?;
+
+            // Insert new items
+            let pairs2 = vec![Pair::new(3u64, 30u64), Pair::new(4u64, 40u64)];
+            let success_count = map.insert(&pairs2, &stream, &module)?;
+            assert_eq!(success_count, 2, "Insert after clear should succeed");
+
+            // Verify new items are present
+            let mut output = unsafe { LockedBuffer::uninitialized(2)? };
+            unsafe {
+                map.find(&[3u64, 4u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert_eq!(output[0], 30u64);
+            assert_eq!(output[1], 40u64);
+
+            // Verify old items are gone
+            let empty_val = map.empty_value_sentinel();
+            let mut output_old = unsafe { LockedBuffer::uninitialized(2)? };
+            unsafe {
+                map.find(&[1u64, 2u64], output_old.as_mut_slice(), &stream, &module)?;
+            }
+            assert_eq!(output_old[0], empty_val);
+            assert_eq!(output_old[1], empty_val);
+
+            Ok(())
+        }
+
+        /// Test async clear
+        #[test]
+        fn test_async_clear() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (mut map, module) = create_test_map_with_module(1024, &stream)?;
+
+            // Insert items
+            let pairs = vec![Pair::new(42u64, 100u64)];
+            map.insert(&pairs, &stream, &module)?;
+
+            // Clear asynchronously
+            unsafe {
+                map.clear_async(&stream)?;
+            }
+            // Synchronize to ensure clear completes
+            stream.synchronize()?;
+
+            // Verify item is gone
+            let empty_val = map.empty_value_sentinel();
+            let mut output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.find(&[42u64], output.as_mut_slice(), &stream, &module)?;
+            }
+            assert_eq!(
+                output[0], empty_val,
+                "After async clear, find should return empty sentinel"
+            );
+
+            Ok(())
+        }
+    }
 }
 
 #[test]
