@@ -122,7 +122,10 @@ mod basic_operations {
             Ok(())
         }
 
-        /// Test inserting duplicate keys - second insert should return true (key exists)
+        /// Test inserting duplicate keys with different values.
+        ///
+        /// The second insert should report success because the key exists,
+        /// but the stored value must remain the first one (no overwrite).
         #[test]
         fn test_duplicate_key_insert() -> Result<(), Box<dyn Error>> {
             let (_ctx, stream) = setup_cuda()?;
@@ -136,19 +139,21 @@ mod basic_operations {
             // Insert same key with different value
             let pairs2 = vec![Pair::new(42u64, 200u64)];
             let success2 = map.insert(&pairs2, &stream, &module)?;
-            // The insert should succeed (return true) but the value may or may not be updated
-            // depending on implementation. Let's check what value is stored.
-            assert_eq!(success2, 1, "Duplicate key insert should return success");
+            // Bulk insert counts an operation as "successful" if the key was inserted
+            // OR already existed, so we still expect a count of 1 here.
+            assert_eq!(
+                success2, 1,
+                "Duplicate key insert should report success when key already exists"
+            );
 
-            // Verify the value (implementation may keep first or update to second)
+            // Verify that the value was NOT overwritten: we should still see the first value.
             let mut output = unsafe { LockedBuffer::uninitialized(1)? };
             unsafe {
                 map.find(&[42u64], output.as_mut_slice(), &stream, &module)?;
             }
-            // The value should be either 100 or 200 depending on implementation
-            assert!(
-                output[0] == 100u64 || output[0] == 200u64,
-                "Value should be one of the inserted values"
+            assert_eq!(
+                output[0], 100u64,
+                "Duplicate insert must not overwrite the original value"
             );
 
             Ok(())
@@ -168,35 +173,68 @@ mod basic_operations {
             Ok(())
         }
 
-        /// Test attempting to insert when map is at capacity
+        /// Test attempting to insert when the map is at capacity.
+        ///
+        /// Once we've filled all slots, additional inserts should fail (return 0
+        /// additional successful operations) and the new key should not be present.
         #[test]
         fn test_full_map_insert() -> Result<(), Box<dyn Error>> {
             let (_ctx, stream) = setup_cuda()?;
-            // Use small capacity to test full map behavior
-            let capacity = 16;
-            let (mut map, module) = create_test_map_with_module(capacity, &stream)?;
+            // Use a small requested capacity, then query the actual capacity that
+            // may be rounded up internally.
+            let requested_capacity = 16;
+            let (mut map, module) = create_test_map_with_module(requested_capacity, &stream)?;
+            let capacity = map.capacity();
 
-            // Fill the map
+            // Fill the map up to its reported capacity.
             let mut pairs = Vec::new();
             for i in 0..capacity {
                 pairs.push(Pair::new(i as u64, (i * 10) as u64));
             }
 
             let success_count = map.insert(&pairs, &stream, &module)?;
-            // All should succeed if capacity is sufficient
             assert_eq!(
                 success_count, capacity,
-                "All inserts should succeed when within capacity"
+                "All inserts up to capacity should succeed"
             );
 
-            // Try to insert one more - may fail or succeed depending on load factor
+            // Verify that all inserted keys are present.
+            let keys: Vec<u64> = (0..capacity).map(|i| i as u64).collect();
+            let mut output = unsafe { LockedBuffer::uninitialized(capacity)? };
+            unsafe {
+                map.find(&keys, output.as_mut_slice(), &stream, &module)?;
+            }
+            for i in 0..capacity {
+                assert_eq!(
+                    output[i],
+                    (i * 10) as u64,
+                    "Value mismatch at index {} before over-capacity insert",
+                    i
+                );
+            }
+
+            // Try to insert one more – this should fail because the table is full.
             let extra_pair = vec![Pair::new(capacity as u64, (capacity * 10) as u64)];
             let extra_success = map.insert(&extra_pair, &stream, &module)?;
-            // This may succeed or fail depending on load factor and probing
-            // Just verify the function doesn't panic
-            assert!(
-                extra_success <= 1,
-                "Extra insert should return 0 or 1"
+            assert_eq!(
+                extra_success, 0,
+                "Insert into a full map should report 0 additional successful inserts"
+            );
+
+            // The extra key should not be present; find should return the empty sentinel.
+            let empty_val = map.empty_value_sentinel();
+            let mut extra_output = unsafe { LockedBuffer::uninitialized(1)? };
+            unsafe {
+                map.find(
+                    &[capacity as u64],
+                    extra_output.as_mut_slice(),
+                    &stream,
+                    &module,
+                )?;
+            }
+            assert_eq!(
+                extra_output[0], empty_val,
+                "Over-capacity insert must not make the new key visible"
             );
 
             Ok(())
@@ -540,6 +578,465 @@ mod basic_operations {
                 "After async clear, find should return empty sentinel"
             );
 
+            Ok(())
+        }
+    }
+}
+
+// Configuration Tests
+mod configuration {
+    use super::*;
+    use super::test_helpers::*;
+    use cuda_static_map_kernels::hash::{XXHash32, XXHash64};
+    use cuda_static_map_kernels::probing::{DoubleHashProbing, LinearProbing, ProbingScheme};
+
+    // Helper macro to test bulk operations for a specific bucket size
+    macro_rules! test_bucket_size_bulk_ops {
+        ($bucket_size:literal, $stream:expr, $module:expr) => {
+            {
+                let empty_key = u64::MAX;
+                let empty_val = u64::MAX;
+                let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+                let pred = DefaultKeyEqual;
+
+                let mut map = StaticMap::<
+                    u64,
+                    u64,
+                    LinearProbing<u64, IdentityHash<u64>>,
+                    $bucket_size,
+                    DefaultKeyEqual,
+                    { ThreadScope::Device },
+                >::new(1024, empty_key, empty_val, pred, probing, $stream)?;
+
+                // Test insert/find/contains with a small set of data
+                let num_items = 50;
+                let mut pairs = Vec::with_capacity(num_items);
+                for i in 0..num_items {
+                    pairs.push(Pair::new(i as u64, (i * 10) as u64));
+                }
+
+                let success_count = map.insert(&pairs, $stream, $module)?;
+                assert_eq!(
+                    success_count, num_items,
+                    "All inserts should succeed for bucket_size={}",
+                    $bucket_size
+                );
+
+                // Verify finds
+                let keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+                let mut output = unsafe { LockedBuffer::uninitialized(num_items)? };
+                unsafe {
+                    map.find(&keys, output.as_mut_slice(), $stream, $module)?;
+                }
+
+                for i in 0..num_items {
+                    assert_eq!(
+                        output[i],
+                        (i * 10) as u64,
+                        "Find mismatch at index {} for bucket_size={}",
+                        i, $bucket_size
+                    );
+                }
+
+                // Verify contains
+                let mut contains_output = unsafe { LockedBuffer::uninitialized(num_items)? };
+                unsafe {
+                    map.contains(&keys, contains_output.as_mut_slice(), $stream, $module)?;
+                }
+
+                for i in 0..num_items {
+                    assert!(
+                        contains_output[i],
+                        "Contains should return true at index {} for bucket_size={}",
+                        i, $bucket_size
+                    );
+                }
+
+                Ok(())
+            }
+        };
+    }
+
+    mod bucket_size {
+        use super::*;
+
+        /// Test bucket size 1
+        #[test]
+        fn test_bucket_size_1() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (_, module) = create_test_map_with_module(1024, &stream)?;
+            test_bucket_size_bulk_ops!(1, &stream, &module)
+        }
+
+        /// Test bucket size 2
+        #[test]
+        fn test_bucket_size_2() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let module = Module::from_ptx(ptx, &[])?;
+            test_bucket_size_bulk_ops!(2, &stream, &module)
+        }
+
+        /// Test bucket size 4
+        #[test]
+        fn test_bucket_size_4() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let module = Module::from_ptx(ptx, &[])?;
+            test_bucket_size_bulk_ops!(4, &stream, &module)
+        }
+
+        /// Test bucket size 8
+        #[test]
+        fn test_bucket_size_8() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let module = Module::from_ptx(ptx, &[])?;
+            test_bucket_size_bulk_ops!(8, &stream, &module)
+        }
+
+        /// Parameterized test for all supported bucket sizes
+        #[test]
+        fn test_all_bucket_sizes() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let module = Module::from_ptx(ptx, &[])?;
+
+            for &bucket_size in &[1, 2, 4, 8] {
+                let empty_key = u64::MAX;
+                let empty_val = u64::MAX;
+                let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+                let pred = DefaultKeyEqual;
+
+                match bucket_size {
+                    1 => {
+                        let _map = StaticMap::<
+                            u64,
+                            u64,
+                            LinearProbing<u64, IdentityHash<u64>>,
+                            1,
+                            DefaultKeyEqual,
+                            { ThreadScope::Device },
+                        >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+                    }
+                    2 => {
+                        let _map = StaticMap::<
+                            u64,
+                            u64,
+                            LinearProbing<u64, IdentityHash<u64>>,
+                            2,
+                            DefaultKeyEqual,
+                            { ThreadScope::Device },
+                        >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+                    }
+                    4 => {
+                        let _map = StaticMap::<
+                            u64,
+                            u64,
+                            LinearProbing<u64, IdentityHash<u64>>,
+                            4,
+                            DefaultKeyEqual,
+                            { ThreadScope::Device },
+                        >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+                    }
+                    8 => {
+                        let _map = StaticMap::<
+                            u64,
+                            u64,
+                            LinearProbing<u64, IdentityHash<u64>>,
+                            8,
+                            DefaultKeyEqual,
+                            { ThreadScope::Device },
+                        >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+
+            Ok(())
+        }
+    }
+
+    mod cooperative_groups {
+        use super::*;
+
+        /// Test cooperative group size 1
+        #[test]
+        fn test_cg_size_1() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (_, module) = create_test_map_with_module(1024, &stream)?;
+            test_bucket_size_bulk_ops!(1, &stream, &module)
+        }
+
+        /// Test cooperative group size 2
+        #[test]
+        fn test_cg_size_2() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let _module = Module::from_ptx(ptx, &[])?;
+
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let probing = LinearProbing::<u64, IdentityHash<u64>, 2>::new(IdentityHash::new());
+            let pred = DefaultKeyEqual;
+
+            let map = StaticMap::<
+                u64,
+                u64,
+                LinearProbing<u64, IdentityHash<u64>, 2>,
+                1,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+
+            // Verify map was created successfully and CG size is correct
+            assert_eq!(map.capacity(), 1024);
+            let map_ref = map.device_ref();
+            assert_eq!(map_ref.probing_scheme().cg_size(), 2);
+
+            // Note: Bulk operations only work for CG_SIZE=1, but device kernels exist for CG=2
+            // See test_cg_insert_find_bs1_cg2 for device kernel tests
+
+            Ok(())
+        }
+
+        /// Test cooperative group size 4
+        #[test]
+        fn test_cg_size_4() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let _module = Module::from_ptx(ptx, &[])?;
+
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let probing = LinearProbing::<u64, IdentityHash<u64>, 4>::new(IdentityHash::new());
+            let pred = DefaultKeyEqual;
+
+            let map = StaticMap::<
+                u64,
+                u64,
+                LinearProbing<u64, IdentityHash<u64>, 4>,
+                1,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+
+            // Verify map was created successfully and CG size is correct
+            assert_eq!(map.capacity(), 1024);
+            let map_ref = map.device_ref();
+            assert_eq!(map_ref.probing_scheme().cg_size(), 4);
+
+            Ok(())
+        }
+
+        /// Test cooperative group size 8
+        #[test]
+        fn test_cg_size_8() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let _module = Module::from_ptx(ptx, &[])?;
+
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let probing = LinearProbing::<u64, IdentityHash<u64>, 8>::new(IdentityHash::new());
+            let pred = DefaultKeyEqual;
+
+            let map = StaticMap::<
+                u64,
+                u64,
+                LinearProbing<u64, IdentityHash<u64>, 8>,
+                1,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+
+            // Verify map was created successfully and CG size is correct
+            assert_eq!(map.capacity(), 1024);
+            let map_ref = map.device_ref();
+            assert_eq!(map_ref.probing_scheme().cg_size(), 8);
+
+            Ok(())
+        }
+
+        /// Test cooperative group size 16
+        #[test]
+        fn test_cg_size_16() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let _module = Module::from_ptx(ptx, &[])?;
+
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let probing = LinearProbing::<u64, IdentityHash<u64>, 16>::new(IdentityHash::new());
+            let pred = DefaultKeyEqual;
+
+            let map = StaticMap::<
+                u64,
+                u64,
+                LinearProbing<u64, IdentityHash<u64>, 16>,
+                1,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+
+            // Verify map was created successfully and CG size is correct
+            assert_eq!(map.capacity(), 1024);
+            let map_ref = map.device_ref();
+            assert_eq!(map_ref.probing_scheme().cg_size(), 16);
+
+            Ok(())
+        }
+
+        /// Test cooperative group size 32
+        #[test]
+        fn test_cg_size_32() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let _module = Module::from_ptx(ptx, &[])?;
+
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let probing = LinearProbing::<u64, IdentityHash<u64>, 32>::new(IdentityHash::new());
+            let pred = DefaultKeyEqual;
+
+            let map = StaticMap::<
+                u64,
+                u64,
+                LinearProbing<u64, IdentityHash<u64>, 32>,
+                1,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+
+            // Verify map was created successfully and CG size is correct
+            assert_eq!(map.capacity(), 1024);
+            let map_ref = map.device_ref();
+            assert_eq!(map_ref.probing_scheme().cg_size(), 32);
+
+            Ok(())
+        }
+    }
+
+    mod probing_schemes {
+        use super::*;
+
+        /// Test linear probing scheme
+        #[test]
+        fn test_linear_probing() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (_, module) = create_test_map_with_module(1024, &stream)?;
+            test_bucket_size_bulk_ops!(1, &stream, &module)
+        }
+
+        /// Test double hashing probing scheme
+        #[test]
+        fn test_double_hash_probing() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let module = Module::from_ptx(ptx, &[])?;
+
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let hasher1 = IdentityHash::new();
+            let hasher2 = IdentityHash::new();
+            let probing = DoubleHashProbing::<u64, IdentityHash<u64>, IdentityHash<u64>>::new(
+                hasher1, hasher2,
+            );
+            let pred = DefaultKeyEqual;
+
+            let mut map = StaticMap::<
+                u64,
+                u64,
+                DoubleHashProbing<u64, IdentityHash<u64>, IdentityHash<u64>>,
+                1,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+
+            // Verify map was created successfully
+            // Note: Double hashing requires prime table sizes, so capacity may differ from requested
+            assert!(map.capacity() >= 1024, "Capacity should be at least 1024 for double hashing");
+            assert_eq!(map.empty_key_sentinel(), empty_key);
+            assert_eq!(map.empty_value_sentinel(), empty_val);
+
+            // Note: DoubleHashProbing may not support bulk operations yet
+            // Just verify the map was created successfully
+            Ok(())
+        }
+    }
+
+    mod hash_functions {
+        use super::*;
+
+        /// Test IdentityHash
+        #[test]
+        fn test_identity_hash() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let (_, module) = create_test_map_with_module(1024, &stream)?;
+            test_bucket_size_bulk_ops!(1, &stream, &module)
+        }
+
+        /// Test XXHash32
+        #[test]
+        fn test_xxhash32() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let module = Module::from_ptx(ptx, &[])?;
+
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let hasher = XXHash32::new(0);
+            let probing = LinearProbing::<u64, XXHash32<u64>>::new(hasher);
+            let pred = DefaultKeyEqual;
+
+            let mut map = StaticMap::<
+                u64,
+                u64,
+                LinearProbing<u64, XXHash32<u64>>,
+                1,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+
+            // Verify map was created successfully
+            assert_eq!(map.capacity(), 1024);
+            assert_eq!(map.empty_key_sentinel(), empty_key);
+            assert_eq!(map.empty_value_sentinel(), empty_val);
+
+            // Note: XXHash32 may not support bulk operations yet (only canonical type supports bulk)
+            // Just verify the map was created successfully
+            Ok(())
+        }
+
+        /// Test XXHash64
+        #[test]
+        fn test_xxhash64() -> Result<(), Box<dyn Error>> {
+            let (_ctx, stream) = setup_cuda()?;
+            let ptx = get_ptx();
+            let module = Module::from_ptx(ptx, &[])?;
+
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let hasher = XXHash64::new(0);
+            let probing = LinearProbing::<u64, XXHash64<u64>>::new(hasher);
+            let pred = DefaultKeyEqual;
+
+            let mut map = StaticMap::<
+                u64,
+                u64,
+                LinearProbing<u64, XXHash64<u64>>,
+                1,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+
+            // Verify map was created successfully
+            assert_eq!(map.capacity(), 1024);
+            assert_eq!(map.empty_key_sentinel(), empty_key);
+            assert_eq!(map.empty_value_sentinel(), empty_val);
+
+            // Note: XXHash64 may not support bulk operations yet (only canonical type supports bulk)
+            // Just verify the map was created successfully
             Ok(())
         }
     }
