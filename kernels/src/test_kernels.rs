@@ -129,6 +129,30 @@ pub unsafe fn test_cg_find_bs1_cg2(
     }
 }
 
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_cg_contains_bs1_cg2(
+    keys: *const K,
+    num_keys: usize,
+    out_results: *mut bool,
+    container_ref: RefBs1Cg2,
+) {
+    let cg_size = 2;
+    let tid = thread::index_1d() as usize;
+    let idx = tid / cg_size;
+    let lane_id = warp::lane_id();
+    let base_lane = (lane_id / cg_size as u32) * cg_size as u32;
+    let tile_mask = ((1u32 << cg_size) - 1) << base_lane;
+
+    if idx < num_keys {
+        let key = unsafe { *keys.add(idx) };
+        let result = unsafe { container_ref.contains_cooperative(tile_mask, &key) };
+        if (lane_id % cg_size as u32) == 0 {
+            unsafe { *out_results.add(idx) = result };
+        }
+    }
+}
+
 // Test kernels for different bucket sizes
 type RefBs2 = StaticMapRef<K, V, S, 2, DefaultKeyEqual, { ThreadScope::Device }>;
 type RefBs4 = StaticMapRef<K, V, S, 4, DefaultKeyEqual, { ThreadScope::Device }>;
@@ -169,6 +193,22 @@ pub unsafe fn test_find_bs2(
 
 #[kernel]
 #[allow(improper_ctypes_definitions)]
+pub unsafe fn test_contains_bs2(
+    keys: *const K,
+    num_keys: usize,
+    out_results: *mut bool,
+    container_ref: RefBs2,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx < num_keys {
+        let key = unsafe { *keys.add(idx) };
+        let result = container_ref.contains(&key);
+        unsafe { *out_results.add(idx) = result };
+    }
+}
+
+#[kernel]
+#[allow(improper_ctypes_definitions)]
 pub unsafe fn test_insert_bs4(
     pairs: *const Pair<K, V>,
     num_pairs: usize,
@@ -197,6 +237,22 @@ pub unsafe fn test_find_bs4(
         let key = unsafe { *keys.add(idx) };
         let val = container_ref.find(&key).unwrap_or(empty_val);
         unsafe { *out_values.add(idx) = val };
+    }
+}
+
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_contains_bs4(
+    keys: *const K,
+    num_keys: usize,
+    out_results: *mut bool,
+    container_ref: RefBs4,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx < num_keys {
+        let key = unsafe { *keys.add(idx) };
+        let result = container_ref.contains(&key);
+        unsafe { *out_results.add(idx) = result };
     }
 }
 
@@ -233,6 +289,22 @@ pub unsafe fn test_find_bs8(
     }
 }
 
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_contains_bs8(
+    keys: *const K,
+    num_keys: usize,
+    out_results: *mut bool,
+    container_ref: RefBs8,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx < num_keys {
+        let key = unsafe { *keys.add(idx) };
+        let result = container_ref.contains(&key);
+        unsafe { *out_results.add(idx) = result };
+    }
+}
+
 // Cooperative Group kernels for different CG sizes
 type SCg4 = LinearProbing<K, IdentityHash<K>, 4>;
 type SCg8 = LinearProbing<K, IdentityHash<K>, 8>;
@@ -244,7 +316,7 @@ type RefBs1Cg16 = StaticMapRef<K, V, SCg16, 1, DefaultKeyEqual, { ThreadScope::D
 type RefBs1Cg32 = StaticMapRef<K, V, SCg32, 1, DefaultKeyEqual, { ThreadScope::Device }>;
 
 macro_rules! cg_kernels {
-    ($cg_size:literal, $cg_type:ty, $ref_type:ty, $insert_name:ident, $find_name:ident) => {
+    ($cg_size:literal, $cg_type:ty, $ref_type:ty, $insert_name:ident, $find_name:ident, $contains_name:ident) => {
         #[kernel]
         #[allow(improper_ctypes_definitions)]
         pub unsafe fn $insert_name(
@@ -303,6 +375,35 @@ macro_rules! cg_kernels {
                 }
             }
         }
+
+        #[kernel]
+        #[allow(improper_ctypes_definitions)]
+        pub unsafe fn $contains_name(
+            keys: *const K,
+            num_keys: usize,
+            out_results: *mut bool,
+            container_ref: $ref_type,
+        ) {
+            let cg_size = $cg_size;
+            let tid = thread::index_1d() as usize;
+            let idx = tid / cg_size;
+            let lane_id = warp::lane_id();
+            let base_lane = (lane_id / cg_size as u32) * cg_size as u32;
+            // For CG size 32, use 0xFFFFFFFF (all bits set), otherwise use bit shift
+            let tile_mask = if cg_size == 32 {
+                0xFFFFFFFFu32
+            } else {
+                ((1u32 << cg_size) - 1) << base_lane
+            };
+
+            if idx < num_keys {
+                let key = unsafe { *keys.add(idx) };
+                let result = unsafe { container_ref.contains_cooperative(tile_mask, &key) };
+                if (lane_id % cg_size as u32) == 0 {
+                    unsafe { *out_results.add(idx) = result };
+                }
+            }
+        }
     };
 }
 
@@ -311,28 +412,32 @@ cg_kernels!(
     SCg4,
     RefBs1Cg4,
     test_cg_insert_bs1_cg4,
-    test_cg_find_bs1_cg4
+    test_cg_find_bs1_cg4,
+    test_cg_contains_bs1_cg4
 );
 cg_kernels!(
     8,
     SCg8,
     RefBs1Cg8,
     test_cg_insert_bs1_cg8,
-    test_cg_find_bs1_cg8
+    test_cg_find_bs1_cg8,
+    test_cg_contains_bs1_cg8
 );
 cg_kernels!(
     16,
     SCg16,
     RefBs1Cg16,
     test_cg_insert_bs1_cg16,
-    test_cg_find_bs1_cg16
+    test_cg_find_bs1_cg16,
+    test_cg_contains_bs1_cg16
 );
 cg_kernels!(
     32,
     SCg32,
     RefBs1Cg32,
     test_cg_insert_bs1_cg32,
-    test_cg_find_bs1_cg32
+    test_cg_find_bs1_cg32,
+    test_cg_contains_bs1_cg32
 );
 
 // Block-level test kernel - all threads in a block cooperate
@@ -413,5 +518,134 @@ pub unsafe fn test_ref_copying_kernel2(
         let key = unsafe { *keys.add(idx) };
         let val = container_ref.find(&key).unwrap_or(empty_val);
         unsafe { *out_values.add(idx) = val };
+    }
+}
+
+// Concurrent operation test kernels
+
+/// Test kernel: Multiple threads inserting different keys simultaneously
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_concurrent_inserts_different_keys(
+    pairs: *const Pair<K, V>,
+    num_pairs: usize,
+    out_results: *mut bool,
+    container_ref: RefBs1,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx < num_pairs {
+        let pair = unsafe { *pairs.add(idx) };
+        let result = container_ref.insert(pair);
+        unsafe { *out_results.add(idx) = result };
+    }
+}
+
+/// Test kernel: Multiple threads trying to insert the same key simultaneously
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_concurrent_inserts_same_key(
+    pair: Pair<K, V>,
+    num_threads: usize,
+    out_results: *mut bool,
+    container_ref: RefBs1,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx < num_threads {
+        let result = container_ref.insert(pair);
+        unsafe { *out_results.add(idx) = result };
+    }
+}
+
+/// Test kernel: Multiple threads finding keys simultaneously
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_concurrent_find(
+    keys: *const K,
+    num_keys: usize,
+    out_values: *mut V,
+    empty_val: V,
+    container_ref: RefBs1,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx < num_keys {
+        let key = unsafe { *keys.add(idx) };
+        let val = container_ref.find(&key).unwrap_or(empty_val);
+        unsafe { *out_values.add(idx) = val };
+    }
+}
+
+/// Test kernel: Concurrent insert and find operations (race condition test)
+/// Some threads insert while others find
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_insert_find_race(
+    pairs: *const Pair<K, V>,
+    keys: *const K,
+    num_ops: usize,
+    out_insert_results: *mut bool,
+    out_find_values: *mut V,
+    empty_val: V,
+    container_ref: RefBs1,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx < num_ops {
+        // First half of threads insert, second half find
+        if idx < num_ops / 2 {
+            let pair = unsafe { *pairs.add(idx) };
+            let result = container_ref.insert(pair);
+            unsafe { *out_insert_results.add(idx) = result };
+        } else {
+            let find_idx = idx - (num_ops / 2);
+            let key = unsafe { *keys.add(find_idx) };
+            let val = container_ref.find(&key).unwrap_or(empty_val);
+            unsafe { *out_find_values.add(find_idx) = val };
+        }
+    }
+}
+
+/// Test kernel: Multiple threads checking contains simultaneously
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_concurrent_contains(
+    keys: *const K,
+    num_keys: usize,
+    out_results: *mut bool,
+    container_ref: RefBs1,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx < num_keys {
+        let key = unsafe { *keys.add(idx) };
+        let result = container_ref.contains(&key);
+        unsafe { *out_results.add(idx) = result };
+    }
+}
+
+/// Test kernel: Insert sentinel key (should fail or be rejected)
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_insert_sentinel_key(
+    sentinel_pair: Pair<K, V>,
+    out_result: *mut bool,
+    container_ref: RefBs1,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx == 0 {
+        let result = container_ref.insert(sentinel_pair);
+        unsafe { *out_result = result };
+    }
+}
+
+/// Test kernel: Insert sentinel value (should work, but value equals sentinel)
+#[kernel]
+#[allow(improper_ctypes_definitions)]
+pub unsafe fn test_insert_sentinel_value(
+    pair: Pair<K, V>,
+    out_result: *mut bool,
+    container_ref: RefBs1,
+) {
+    let idx = thread::index_1d() as usize;
+    if idx == 0 {
+        let result = container_ref.insert(pair);
+        unsafe { *out_result = result };
     }
 }
