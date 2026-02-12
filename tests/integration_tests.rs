@@ -5,10 +5,10 @@
 use cuda_static_map::{StaticMap, get_ptx};
 use cuda_static_map_kernels::hash::IdentityHash;
 use cuda_static_map_kernels::open_addressing::{DefaultKeyEqual, ThreadScope};
-use cuda_static_map_kernels::pair::{Pair};
+use cuda_static_map_kernels::pair::Pair;
 use cuda_static_map_kernels::probing::LinearProbing;
-use cust::prelude::*;
 use cust::memory::LockedBuffer;
+use cust::prelude::*;
 use std::error::Error;
 
 // Helper to init CUDA
@@ -33,15 +33,14 @@ mod test_helpers {
         { ThreadScope::Device },
     >;
 
-    pub fn create_test_map(
-        capacity: usize,
-        stream: &Stream,
-    ) -> Result<TestMap, Box<dyn Error>> {
+    pub fn create_test_map(capacity: usize, stream: &Stream) -> Result<TestMap, Box<dyn Error>> {
         let empty_key = u64::MAX;
         let empty_val = u64::MAX;
         let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
         let pred = DefaultKeyEqual;
-        Ok(TestMap::new(capacity, empty_key, empty_val, pred, probing, stream)?)
+        Ok(TestMap::new(
+            capacity, empty_key, empty_val, pred, probing, stream,
+        )?)
     }
 
     pub fn create_test_map_with_module(
@@ -57,8 +56,8 @@ mod test_helpers {
 
 // Basic Operations Tests
 mod basic_operations {
-    use super::*;
     use super::test_helpers::*;
+    use super::*;
 
     mod insert {
         use super::*;
@@ -98,10 +97,7 @@ mod basic_operations {
             }
 
             let success_count = map.insert(&pairs, &stream, &module)?;
-            assert_eq!(
-                success_count, num_items,
-                "All inserts should succeed"
-            );
+            assert_eq!(success_count, num_items, "All inserts should succeed");
 
             // Verify all were inserted
             let keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
@@ -111,12 +107,7 @@ mod basic_operations {
             }
 
             for i in 0..num_items {
-                assert_eq!(
-                    output[i],
-                    (i * 10) as u64,
-                    "Value mismatch at index {}",
-                    i
-                );
+                assert_eq!(output[i], (i * 10) as u64, "Value mismatch at index {}", i);
             }
 
             Ok(())
@@ -393,7 +384,10 @@ mod basic_operations {
             unsafe {
                 map.contains(&[999u64], output.as_mut_slice(), &stream, &module)?;
             }
-            assert!(!output[0], "Contains should return false for non-existent key");
+            assert!(
+                !output[0],
+                "Contains should return false for non-existent key"
+            );
 
             Ok(())
         }
@@ -585,76 +579,75 @@ mod basic_operations {
 
 // Configuration Tests
 mod configuration {
-    use super::*;
     use super::test_helpers::*;
+    use super::*;
     use cuda_static_map_kernels::hash::{XXHash32, XXHash64};
     use cuda_static_map_kernels::probing::{DoubleHashProbing, LinearProbing, ProbingScheme};
 
     // Helper macro to test bulk operations for a specific bucket size
     macro_rules! test_bucket_size_bulk_ops {
-        ($bucket_size:literal, $stream:expr, $module:expr) => {
-            {
-                let empty_key = u64::MAX;
-                let empty_val = u64::MAX;
-                let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
-                let pred = DefaultKeyEqual;
+        ($bucket_size:literal, $stream:expr, $module:expr) => {{
+            let empty_key = u64::MAX;
+            let empty_val = u64::MAX;
+            let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+            let pred = DefaultKeyEqual;
 
-                let mut map = StaticMap::<
-                    u64,
-                    u64,
-                    LinearProbing<u64, IdentityHash<u64>>,
-                    $bucket_size,
-                    DefaultKeyEqual,
-                    { ThreadScope::Device },
-                >::new(1024, empty_key, empty_val, pred, probing, $stream)?;
+            let mut map = StaticMap::<
+                u64,
+                u64,
+                LinearProbing<u64, IdentityHash<u64>>,
+                $bucket_size,
+                DefaultKeyEqual,
+                { ThreadScope::Device },
+            >::new(1024, empty_key, empty_val, pred, probing, $stream)?;
 
-                // Test insert/find/contains with a small set of data
-                let num_items = 50;
-                let mut pairs = Vec::with_capacity(num_items);
-                for i in 0..num_items {
-                    pairs.push(Pair::new(i as u64, (i * 10) as u64));
-                }
+            // Test insert/find/contains with a small set of data
+            let num_items = 50;
+            let mut pairs = Vec::with_capacity(num_items);
+            for i in 0..num_items {
+                pairs.push(Pair::new(i as u64, (i * 10) as u64));
+            }
 
-                let success_count = map.insert(&pairs, $stream, $module)?;
+            let success_count = map.insert(&pairs, $stream, $module)?;
+            assert_eq!(
+                success_count, num_items,
+                "All inserts should succeed for bucket_size={}",
+                $bucket_size
+            );
+
+            // Verify finds
+            let keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+            let mut output = unsafe { LockedBuffer::uninitialized(num_items)? };
+            unsafe {
+                map.find(&keys, output.as_mut_slice(), $stream, $module)?;
+            }
+
+            for i in 0..num_items {
                 assert_eq!(
-                    success_count, num_items,
-                    "All inserts should succeed for bucket_size={}",
+                    output[i],
+                    (i * 10) as u64,
+                    "Find mismatch at index {} for bucket_size={}",
+                    i,
                     $bucket_size
                 );
-
-                // Verify finds
-                let keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
-                let mut output = unsafe { LockedBuffer::uninitialized(num_items)? };
-                unsafe {
-                    map.find(&keys, output.as_mut_slice(), $stream, $module)?;
-                }
-
-                for i in 0..num_items {
-                    assert_eq!(
-                        output[i],
-                        (i * 10) as u64,
-                        "Find mismatch at index {} for bucket_size={}",
-                        i, $bucket_size
-                    );
-                }
-
-                // Verify contains
-                let mut contains_output = unsafe { LockedBuffer::uninitialized(num_items)? };
-                unsafe {
-                    map.contains(&keys, contains_output.as_mut_slice(), $stream, $module)?;
-                }
-
-                for i in 0..num_items {
-                    assert!(
-                        contains_output[i],
-                        "Contains should return true at index {} for bucket_size={}",
-                        i, $bucket_size
-                    );
-                }
-
-                Ok(())
             }
-        };
+
+            // Verify contains
+            let mut contains_output = unsafe { LockedBuffer::uninitialized(num_items)? };
+            unsafe {
+                map.contains(&keys, contains_output.as_mut_slice(), $stream, $module)?;
+            }
+
+            for i in 0..num_items {
+                assert!(
+                    contains_output[i],
+                    "Contains should return true at index {} for bucket_size={}",
+                    i, $bucket_size
+                );
+            }
+
+            Ok(())
+        }};
     }
 
     mod bucket_size {
@@ -717,7 +710,9 @@ mod configuration {
                             1,
                             DefaultKeyEqual,
                             { ThreadScope::Device },
-                        >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+                        >::new(
+                            1024, empty_key, empty_val, pred, probing, &stream
+                        )?;
                     }
                     2 => {
                         let _map = StaticMap::<
@@ -727,7 +722,9 @@ mod configuration {
                             2,
                             DefaultKeyEqual,
                             { ThreadScope::Device },
-                        >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+                        >::new(
+                            1024, empty_key, empty_val, pred, probing, &stream
+                        )?;
                     }
                     4 => {
                         let _map = StaticMap::<
@@ -737,7 +734,9 @@ mod configuration {
                             4,
                             DefaultKeyEqual,
                             { ThreadScope::Device },
-                        >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+                        >::new(
+                            1024, empty_key, empty_val, pred, probing, &stream
+                        )?;
                     }
                     8 => {
                         let _map = StaticMap::<
@@ -747,7 +746,9 @@ mod configuration {
                             8,
                             DefaultKeyEqual,
                             { ThreadScope::Device },
-                        >::new(1024, empty_key, empty_val, pred, probing, &stream)?;
+                        >::new(
+                            1024, empty_key, empty_val, pred, probing, &stream
+                        )?;
                     }
                     _ => unreachable!(),
                 }
@@ -955,7 +956,10 @@ mod configuration {
 
             // Verify map was created successfully
             // Note: Double hashing requires prime table sizes, so capacity may differ from requested
-            assert!(map.capacity() >= 1024, "Capacity should be at least 1024 for double hashing");
+            assert!(
+                map.capacity() >= 1024,
+                "Capacity should be at least 1024 for double hashing"
+            );
             assert_eq!(map.empty_key_sentinel(), empty_key);
             assert_eq!(map.empty_value_sentinel(), empty_val);
 
@@ -1247,4 +1251,922 @@ fn test_cg_insert_find_bs1_cg2() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+// Device Reference Tests (StaticMapRef)
+mod device_tests {
+    use super::*;
+    use cuda_static_map_kernels::static_map_ref::StaticMapRef;
+
+    type RefBs1 = StaticMapRef<
+        u64,
+        u64,
+        LinearProbing<u64, IdentityHash<u64>>,
+        1,
+        DefaultKeyEqual,
+        { ThreadScope::Device },
+    >;
+
+    /// Test device_ref() construction and verify ref fields are correct
+    #[test]
+    fn test_device_ref_construction() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>>,
+            1,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        // Create device ref
+        let map_ref = map.device_ref();
+
+        // Verify ref fields match host map
+        assert_eq!(map_ref.capacity(), map.capacity());
+        assert_eq!(map_ref.empty_key_sentinel(), map.empty_key_sentinel());
+        assert_eq!(map_ref.empty_value_sentinel(), map.empty_value_sentinel());
+        assert_eq!(map_ref.erased_key_sentinel(), map.erased_key_sentinel());
+
+        // Test kernel that reads ref fields on device
+        let kernel = module.get_function("test_device_ref_fields")?;
+        let out_capacity = unsafe { DeviceBuffer::uninitialized(1)? };
+        let out_empty_key = unsafe { DeviceBuffer::uninitialized(1)? };
+        let out_empty_val = unsafe { DeviceBuffer::uninitialized(1)? };
+        let out_erased_key = unsafe { DeviceBuffer::uninitialized(1)? };
+
+        unsafe {
+            launch!(kernel<<<1, 1, 0, stream>>>(
+                map_ref,
+                out_capacity.as_device_ptr(),
+                out_empty_key.as_device_ptr(),
+                out_empty_val.as_device_ptr(),
+                out_erased_key.as_device_ptr()
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_capacity = vec![0usize; 1];
+        let mut host_empty_key = vec![0u64; 1];
+        let mut host_empty_val = vec![0u64; 1];
+        let mut host_erased_key = vec![0u64; 1];
+
+        out_capacity.copy_to(&mut host_capacity)?;
+        out_empty_key.copy_to(&mut host_empty_key)?;
+        out_empty_val.copy_to(&mut host_empty_val)?;
+        out_erased_key.copy_to(&mut host_erased_key)?;
+
+        assert_eq!(host_capacity[0], capacity);
+        assert_eq!(host_empty_key[0], empty_key);
+        assert_eq!(host_empty_val[0], empty_val);
+        assert_eq!(host_erased_key[0], map.erased_key_sentinel());
+
+        Ok(())
+    }
+
+    /// Test passing StaticMapRef between kernels
+    #[test]
+    fn test_device_ref_copying() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>>,
+            1,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let map_ref = map.device_ref();
+
+        // First kernel: insert data
+        let num_items = 50;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_ref_copy: DeviceBuffer<RefBs1> = unsafe { DeviceBuffer::uninitialized(1)? };
+
+        let kernel1 = module.get_function("test_ref_copying_kernel1")?;
+        let block_size = 128;
+        let grid_size = (num_items + block_size - 1) / block_size;
+
+        unsafe {
+            launch!(kernel1<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                map_ref,
+                out_ref_copy.as_device_ptr()
+            ))?;
+        }
+        stream.synchronize()?;
+
+        // Second kernel: use the copied ref to find data
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_values = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel2 = module.get_function("test_ref_copying_kernel2")?;
+
+        unsafe {
+            launch!(kernel2<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                num_items,
+                out_values.as_device_ptr(),
+                empty_val,
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_values = vec![0u64; num_items];
+        out_values.copy_to(&mut host_values)?;
+
+        for (i, &val) in host_values.iter().enumerate() {
+            assert_eq!(
+                val,
+                (i * 10) as u64,
+                "Ref copying test failed at index {}",
+                i
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Test single-thread kernel operations with bucket size 2
+    #[test]
+    fn test_single_thread_insert_find_bs2() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>>,
+            2,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let num_items = 100;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel = module.get_function("test_insert_bs2")?;
+        let block_size = 128;
+        let grid_size = (num_items + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_results = vec![false; num_items];
+        out_results.copy_to(&mut host_results)?;
+
+        for (i, &res) in host_results.iter().enumerate() {
+            assert!(res, "Insert failed at index {} for bucket_size=2", i);
+        }
+
+        // Test find
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_values = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel_find = module.get_function("test_find_bs2")?;
+
+        unsafe {
+            launch!(kernel_find<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                num_items,
+                out_values.as_device_ptr(),
+                empty_val,
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_values = vec![0u64; num_items];
+        out_values.copy_to(&mut host_values)?;
+
+        for (i, &val) in host_values.iter().enumerate() {
+            assert_eq!(
+                val,
+                (i * 10) as u64,
+                "Find mismatch at index {} for bucket_size=2",
+                i
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Test single-thread kernel operations with bucket size 4
+    #[test]
+    fn test_single_thread_insert_find_bs4() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>>,
+            4,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let num_items = 100;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel = module.get_function("test_insert_bs4")?;
+        let block_size = 128;
+        let grid_size = (num_items + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_results = vec![false; num_items];
+        out_results.copy_to(&mut host_results)?;
+
+        for (i, &res) in host_results.iter().enumerate() {
+            assert!(res, "Insert failed at index {} for bucket_size=4", i);
+        }
+
+        // Test find
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_values = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel_find = module.get_function("test_find_bs4")?;
+
+        unsafe {
+            launch!(kernel_find<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                num_items,
+                out_values.as_device_ptr(),
+                empty_val,
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_values = vec![0u64; num_items];
+        out_values.copy_to(&mut host_values)?;
+
+        for (i, &val) in host_values.iter().enumerate() {
+            assert_eq!(
+                val,
+                (i * 10) as u64,
+                "Find mismatch at index {} for bucket_size=4",
+                i
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Test single-thread kernel operations with bucket size 8
+    #[test]
+    fn test_single_thread_insert_find_bs8() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>>,
+            8,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let num_items = 100;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel = module.get_function("test_insert_bs8")?;
+        let block_size = 128;
+        let grid_size = (num_items + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_results = vec![false; num_items];
+        out_results.copy_to(&mut host_results)?;
+
+        for (i, &res) in host_results.iter().enumerate() {
+            assert!(res, "Insert failed at index {} for bucket_size=8", i);
+        }
+
+        // Test find
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_values = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel_find = module.get_function("test_find_bs8")?;
+
+        unsafe {
+            launch!(kernel_find<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                num_items,
+                out_values.as_device_ptr(),
+                empty_val,
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_values = vec![0u64; num_items];
+        out_values.copy_to(&mut host_values)?;
+
+        for (i, &val) in host_values.iter().enumerate() {
+            assert_eq!(
+                val,
+                (i * 10) as u64,
+                "Find mismatch at index {} for bucket_size=8",
+                i
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Test multi-thread kernel operations (block-level)
+    #[test]
+    fn test_block_level_operations() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>>,
+            1,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let num_items = 200;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel = module.get_function("test_block_insert_bs1")?;
+        let block_size = 256;
+        let grid_size = (num_items + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_results = vec![false; num_items];
+        out_results.copy_to(&mut host_results)?;
+
+        for (i, &res) in host_results.iter().enumerate() {
+            assert!(res, "Block-level insert failed at index {}", i);
+        }
+
+        // Verify with find
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let mut output = unsafe { LockedBuffer::uninitialized(num_items)? };
+        unsafe {
+            map.find(&keys, output.as_mut_slice(), &stream, &module)?;
+        }
+
+        for i in 0..num_items {
+            assert_eq!(
+                output[i],
+                (i * 10) as u64,
+                "Block-level find mismatch at index {}",
+                i
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Test warp-level cooperative operations with CG size 4
+    #[test]
+    fn test_warp_level_cg4() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>, 4>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>, 4>,
+            1,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let num_items = 100;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel = module.get_function("test_cg_insert_bs1_cg4")?;
+        let cg_size = 4;
+        let block_size = 128;
+        let total_threads = num_items * cg_size;
+        let grid_size = (total_threads + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_results = vec![false; num_items];
+        out_results.copy_to(&mut host_results)?;
+
+        for (i, &res) in host_results.iter().enumerate() {
+            assert!(res, "CG4 insert failed at index {}", i);
+        }
+
+        // Test find
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_values = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel_find = module.get_function("test_cg_find_bs1_cg4")?;
+
+        unsafe {
+            launch!(kernel_find<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                num_items,
+                out_values.as_device_ptr(),
+                empty_val,
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_values = vec![0u64; num_items];
+        out_values.copy_to(&mut host_values)?;
+
+        for (i, &val) in host_values.iter().enumerate() {
+            assert_eq!(val, (i * 10) as u64, "CG4 find mismatch at index {}", i);
+        }
+
+        Ok(())
+    }
+
+    /// Test warp-level cooperative operations with CG size 8
+    #[test]
+    fn test_warp_level_cg8() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>, 8>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>, 8>,
+            1,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let num_items = 100;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel = module.get_function("test_cg_insert_bs1_cg8")?;
+        let cg_size = 8;
+        let block_size = 128;
+        let total_threads = num_items * cg_size;
+        let grid_size = (total_threads + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_results = vec![false; num_items];
+        out_results.copy_to(&mut host_results)?;
+
+        for (i, &res) in host_results.iter().enumerate() {
+            assert!(res, "CG8 insert failed at index {}", i);
+        }
+
+        // Test find
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_values = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel_find = module.get_function("test_cg_find_bs1_cg8")?;
+
+        unsafe {
+            launch!(kernel_find<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                num_items,
+                out_values.as_device_ptr(),
+                empty_val,
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_values = vec![0u64; num_items];
+        out_values.copy_to(&mut host_values)?;
+
+        for (i, &val) in host_values.iter().enumerate() {
+            assert_eq!(val, (i * 10) as u64, "CG8 find mismatch at index {}", i);
+        }
+
+        Ok(())
+    }
+
+    /// Test warp-level cooperative operations with CG size 16
+    #[test]
+    fn test_warp_level_cg16() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>, 16>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>, 16>,
+            1,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let num_items = 100;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel = module.get_function("test_cg_insert_bs1_cg16")?;
+        let cg_size = 16;
+        let block_size = 128;
+        let total_threads = num_items * cg_size;
+        let grid_size = (total_threads + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_results = vec![false; num_items];
+        out_results.copy_to(&mut host_results)?;
+
+        for (i, &res) in host_results.iter().enumerate() {
+            assert!(res, "CG16 insert failed at index {}", i);
+        }
+
+        // Test find
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_values = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel_find = module.get_function("test_cg_find_bs1_cg16")?;
+
+        unsafe {
+            launch!(kernel_find<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                num_items,
+                out_values.as_device_ptr(),
+                empty_val,
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_values = vec![0u64; num_items];
+        out_values.copy_to(&mut host_values)?;
+
+        for (i, &val) in host_values.iter().enumerate() {
+            assert_eq!(val, (i * 10) as u64, "CG16 find mismatch at index {}", i);
+        }
+
+        Ok(())
+    }
+
+    /// Test warp-level cooperative operations with CG size 32
+    #[test]
+    fn test_warp_level_cg32() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>, 32>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>, 32>,
+            1,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        let num_items = 100;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel = module.get_function("test_cg_insert_bs1_cg32")?;
+        let cg_size = 32;
+        let block_size = 128;
+        let total_threads = num_items * cg_size;
+        let grid_size = (total_threads + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_results = vec![false; num_items];
+        out_results.copy_to(&mut host_results)?;
+
+        for (i, &res) in host_results.iter().enumerate() {
+            assert!(res, "CG32 insert failed at index {}", i);
+        }
+
+        // Test find
+        let mut keys: Vec<u64> = (0..num_items).map(|i| i as u64).collect();
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_values = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel_find = module.get_function("test_cg_find_bs1_cg32")?;
+
+        unsafe {
+            launch!(kernel_find<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                num_items,
+                out_values.as_device_ptr(),
+                empty_val,
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_values = vec![0u64; num_items];
+        out_values.copy_to(&mut host_values)?;
+
+        for (i, &val) in host_values.iter().enumerate() {
+            assert_eq!(val, (i * 10) as u64, "CG32 find mismatch at index {}", i);
+        }
+
+        Ok(())
+    }
+
+    /// Test device-side contains operation
+    #[test]
+    fn test_device_contains() -> Result<(), Box<dyn Error>> {
+        let (_ctx, stream) = setup_cuda()?;
+        let ptx = get_ptx();
+        let module = Module::from_ptx(ptx, &[])?;
+
+        let capacity = 1024;
+        let empty_key = u64::MAX;
+        let empty_val = u64::MAX;
+        let probing = LinearProbing::<u64, IdentityHash<u64>>::new(IdentityHash::new());
+        let pred = DefaultKeyEqual;
+
+        let mut map = StaticMap::<
+            u64,
+            u64,
+            LinearProbing<u64, IdentityHash<u64>>,
+            1,
+            DefaultKeyEqual,
+            { ThreadScope::Device },
+        >::new(capacity, empty_key, empty_val, pred, probing, &stream)?;
+
+        // Insert via device kernel
+        let num_items = 100;
+        let mut pairs = Vec::with_capacity(num_items);
+        for i in 0..num_items {
+            pairs.push(Pair::new(i as u64, (i * 10) as u64));
+        }
+        let pairs_buf = DeviceBuffer::from_slice(&pairs)?;
+        let out_results: DeviceBuffer<bool> = unsafe { DeviceBuffer::uninitialized(num_items)? };
+
+        let kernel_insert = module.get_function("test_insert_bs1")?;
+        let block_size = 128;
+        let grid_size = (num_items + block_size - 1) / block_size;
+
+        let map_ref = map.device_ref();
+
+        unsafe {
+            launch!(kernel_insert<<<grid_size as u32, block_size as u32, 0, stream>>>(
+                pairs_buf.as_device_ptr(),
+                num_items,
+                out_results.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        // Test contains for existing and non-existing keys
+        let mut keys = Vec::with_capacity(num_items + 20);
+        for i in 0..num_items {
+            keys.push(i as u64);
+        }
+        for i in num_items..num_items + 20 {
+            keys.push(i as u64);
+        }
+        let keys_buf = DeviceBuffer::from_slice(&keys)?;
+        let out_contains = unsafe { DeviceBuffer::uninitialized(keys.len())? };
+
+        let kernel_contains = module.get_function("test_contains_bs1")?;
+        let grid_size_contains = (keys.len() + block_size - 1) / block_size;
+
+        unsafe {
+            launch!(kernel_contains<<<grid_size_contains as u32, block_size as u32, 0, stream>>>(
+                keys_buf.as_device_ptr(),
+                keys.len(),
+                out_contains.as_device_ptr(),
+                map_ref
+            ))?;
+        }
+        stream.synchronize()?;
+
+        let mut host_contains = vec![false; keys.len()];
+        out_contains.copy_to(&mut host_contains)?;
+
+        // First num_items should be true, rest should be false
+        for i in 0..num_items {
+            assert!(
+                host_contains[i],
+                "Contains should return true for existing key {}",
+                i
+            );
+        }
+        for i in num_items..keys.len() {
+            assert!(
+                !host_contains[i],
+                "Contains should return false for non-existing key {}",
+                i
+            );
+        }
+
+        Ok(())
+    }
 }
